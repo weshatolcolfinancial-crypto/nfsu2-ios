@@ -1,0 +1,208 @@
+name: Build iOS IPA and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      xbe_url:
+        description: "URL to direct download default.xbe or game archive (optional)"
+        required: false
+        default: ""
+      gen_tar_url:
+        description: "URL to download pre-lifted gen/ archive tar.gz (optional)"
+        required: false
+        default: ""
+      bundle_id:
+        description: "iOS Bundle Identifier"
+        required: false
+        default: "com.recomp.nfsu2x"
+      create_release:
+        description: "Publish a GitHub Release with the IPA"
+        required: false
+        type: boolean
+        default: true
+      release_tag:
+        description: "Release Tag"
+        required: false
+        default: "v0.1.0-ios"
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-ios:
+    name: Build iOS IPA (arm64 Metal)
+    runs-on: macos-14
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select Xcode Version
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer 2>/dev/null || \
+          sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer 2>/dev/null || \
+          sudo xcode-select -s /Applications/Xcode_16.0.app/Contents/Developer 2>/dev/null || \
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Install Build Prerequisites
+        run: |
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          export HOMEBREW_NO_INSTALL_CLEANUP=1
+          brew install cmake ninja glslang molten-vk vulkan-headers
+
+          python3 -m pip install --upgrade pip
+          pip3 install 'capstone<6'
+
+          chmod +x tools/*.sh
+
+      - name: Prepare Lifted Game Code (gen/)
+        env:
+          INPUT_XBE_URL: ${{ github.event.inputs.xbe_url }}
+          INPUT_GEN_URL: ${{ github.event.inputs.gen_tar_url }}
+          SECRET_XBE_URL: ${{ secrets.NFSU2_XBE_URL }}
+          SECRET_GEN_URL: ${{ secrets.NFSU2_GEN_TAR_URL }}
+          SECRET_GEN_BASE64: ${{ secrets.NFSU2_GEN_TAR_BASE64 }}
+        run: |
+          mkdir -p gen
+
+          GEN_URL="${INPUT_GEN_URL:-$SECRET_GEN_URL}"
+          XBE_URL="${INPUT_XBE_URL:-$SECRET_XBE_URL}"
+
+          if [ -n "$GEN_URL" ]; then
+            echo "==> Downloading pre-lifted C code from $GEN_URL..."
+            curl -fSL "$GEN_URL" | tar -xz -C .
+          elif [ -n "$SECRET_GEN_BASE64" ]; then
+            echo "==> Extracting gen/ from base64 secret..."
+            echo "$SECRET_GEN_BASE64" | base64 -d | tar -xz -C .
+          elif [ -n "$XBE_URL" ]; then
+            echo "==> Downloading default.xbe from $XBE_URL..."
+            mkdir -p /tmp/nfsu2_xbe
+            curl -fSL "$XBE_URL" -o /tmp/nfsu2_xbe/downloaded
+            # Check if zip, 7z or raw xbe
+            if file /tmp/nfsu2_xbe/downloaded | grep -q 'Zip archive'; then
+              unzip -q /tmp/nfsu2_xbe/downloaded -d /tmp/nfsu2_xbe
+            fi
+            XBE_FILE=$(find /tmp/nfsu2_xbe -name "default.xbe" -o -name "*.xbe" | head -1)
+            if [ -z "$XBE_FILE" ]; then
+              XBE_FILE="/tmp/nfsu2_xbe/downloaded"
+            fi
+            echo "==> Running tools/regen.sh on $XBE_FILE..."
+            PATH=$PWD/xboxrecomp/.venv/bin:$PATH NFSU2_XBE="$XBE_FILE" NFSU2_GEN_DIR=$PWD/gen tools/regen.sh
+          fi
+
+          # If gen/recomp_funcs.h still does not exist, generate test stubs
+          if [ ! -f "gen/recomp_funcs.h" ]; then
+            echo "==> No gen/recomp_funcs.h found. Generating test stub with tools/gen_stub.py..."
+            python3 tools/gen_stub.py
+            echo "IS_STUB_BUILD=1" >> $GITHUB_ENV
+          else
+            echo "==> Using lifted code in gen/"
+            ls -lh gen | head -10
+            echo "IS_STUB_BUILD=0" >> $GITHUB_ENV
+          fi
+
+      - name: Build iOS Dependencies (SDL2, glslang, MoltenVK)
+        run: |
+          tools/build_ios_deps.sh device
+
+      - name: Build FFmpeg Framework (VP6 Decoder)
+        run: |
+          tools/build_ffmpeg_apple.sh device
+
+      - name: Configure CMake for iOS (Metal + Vulkan)
+        run: |
+          BUNDLE_ID="${{ github.event.inputs.bundle_id }}"
+          if [ -z "$BUNDLE_ID" ]; then
+            BUNDLE_ID="com.recomp.nfsu2x"
+          fi
+          echo "Using iOS Bundle ID: $BUNDLE_ID"
+
+          cmake -S . -B build-ios -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
+            -DCMAKE_PREFIX_PATH=$HOME/nfsu2/deps/device \
+            -DCMAKE_FIND_ROOT_PATH=$HOME/nfsu2/deps/device \
+            -DNFSU2_GEN_DIR=$PWD/gen \
+            -DNFSU2_VULKAN=ON \
+            -DNFSU2_METAL=ON \
+            -DNFSU2_FFMPEG_DIR=$HOME/nfsu2/deps/device \
+            -DNFSU2_IOS_BUNDLE_ID="$BUNDLE_ID" \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY="" \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO
+
+      - name: Compile iOS App (xcodebuild)
+        run: |
+          xcodebuild -project build-ios/nfsu2_recomp.xcodeproj \
+            -scheme nfsu2_recomp \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Package iOS IPA
+        run: |
+          tools/package_ipa.sh build-ios/Release-iphoneos/nfsu2_recomp.app build-ios/NFSU2-iOS.ipa
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NFSU2-iOS-ipa
+          path: build-ios/NFSU2-iOS.ipa
+          retention-days: 14
+
+      - name: Determine Release Tag
+        if: ${{ github.event.inputs.create_release == 'true' || startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          if [ "$TAG" = "ios" ] || [ "$TAG" = "main" ] || [ -z "$TAG" ]; then
+            TAG="${{ github.event.inputs.release_tag }}"
+            if [ -z "$TAG" ]; then
+              TAG="v0.1.0-ios"
+            fi
+          fi
+          echo "RELEASE_TAG=$TAG" >> $GITHUB_ENV
+          echo "Release tag: $TAG"
+
+      - name: Publish GitHub Release
+        if: ${{ github.event.inputs.create_release == 'true' || startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NOTES="### Need for Speed: Underground 2 — iOS Port (Metal / MoltenVK)
+
+**Automated iOS IPA Build**
+
+#### Installation
+1. Sideload **\`NFSU2-iOS.ipa\`** onto your iPhone or iPad using **AltStore**, **Sideloadly**, **TrollStore**, **LiveContainer**, **Scarlet**, or **Esign**.
+2. Place your extracted Xbox disc files in the app container (\`Documents/game/\`) or select the extracted folder via the in-app document picker on first boot.
+
+#### Notes
+- **Renderer:** Native **Metal** (iOS 17+) with **MoltenVK** fallback (iOS 16+).
+- **Controls:** Touch overlay (floating virtual stick, pedals, face buttons) and physical controllers (Xbox, DualSense, MFi).
+- **Entitlements:** Expanded memory limit enabled (\`com.apple.developer.kernel.increased-memory-limit\`)."
+
+          if [ "$IS_STUB_BUILD" = "1" ]; then
+            NOTES="$NOTES
+
+> [!NOTE]
+> This IPA was built with pipeline verification stubs. To build with full game code, trigger the workflow providing \`xbe_url\` or \`gen_tar_url\` with your retail NTSC-U disc."
+          fi
+
+          echo "Publishing release $RELEASE_TAG..."
+          gh release create "$RELEASE_TAG" build-ios/NFSU2-iOS.ipa \
+            --title "NFSU2 iOS $RELEASE_TAG" \
+            --notes "$NOTES" \
+            --target "${{ github.sha }}" 2>/dev/null || \
+          gh release upload "$RELEASE_TAG" build-ios/NFSU2-iOS.ipa --clobber

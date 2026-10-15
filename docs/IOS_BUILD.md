@@ -110,8 +110,25 @@ xcrun devicectl list devices                                  # your iPhone's id
 xcrun devicectl device install app --device <UDID> build-ios/Release-iphoneos/nfsu2_recomp.app
 ```
 
-The first time, allow the developer on the phone: Settings → General → VPN & Device Management.
-After a change to a CMake file, run `cmake build-ios` again before `xcodebuild`.
+### Packaging an IPA for Sideloading (AltStore, Sideloadly, TrollStore)
+
+To package an `.ipa` for sideloading or sharing to your own devices:
+
+```sh
+tools/package_ipa.sh build-ios/Release-iphoneos/nfsu2_recomp.app build-ios/NFSU2-iOS.ipa
+```
+
+This embeds the FFmpeg dynamic frameworks (`avcodec.framework`, `avutil.framework`), applies app icons and entitlements, applies ad-hoc codesign, and zips the bundle into a standard sideloadable `.ipa`.
+
+### Cloud CI/CD with GitHub Actions
+
+You can also build the IPA using GitHub Actions on macOS runners:
+1. Go to the **Actions** tab on GitHub and select **Build iOS IPA and Release**.
+2. Click **Run workflow**. You can optionally provide:
+   - `xbe_url`: Direct download URL to your `default.xbe` or game zip.
+   - `gen_tar_url`: Direct download URL to a pre-lifted `gen.tar.gz` archive.
+   - Or configure repository secret `NFSU2_XBE_URL` / `NFSU2_GEN_TAR_URL`.
+3. Once completed, download the IPA from workflow artifacts or grab the GitHub Release!
 
 ## 7. Put the game on the phone
 

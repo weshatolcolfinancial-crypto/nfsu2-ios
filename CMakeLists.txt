@@ -20,14 +20,19 @@ add_compile_definitions(
 set(XBOXRECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/xboxrecomp" CACHE PATH
     "Path to the xboxrecomp toolkit root directory")
 
-# The lifted code is ~100 MB of C generated from the retail XBE. It is never
-# committed; point this at wherever tools.recomp --gen-dir wrote it.
-set(NFSU2_GEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/recomp/gen" CACHE PATH
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/gen/recomp_funcs.h")
+    set(NFSU2_DEFAULT_GEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/gen")
+else()
+    set(NFSU2_DEFAULT_GEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/recomp/gen")
+endif()
+
+set(NFSU2_GEN_DIR "${NFSU2_DEFAULT_GEN_DIR}" CACHE PATH
     "Directory holding the tools.recomp output (recomp_*.c, recomp_funcs.h)")
 
 if(NOT EXISTS "${NFSU2_GEN_DIR}/recomp_funcs.h")
-    message(FATAL_ERROR "No generated code in ${NFSU2_GEN_DIR}. Run tools.recomp "
-                        "with --gen-dir, or pass -DNFSU2_GEN_DIR=<dir>.")
+    message(FATAL_ERROR "No generated code in ${NFSU2_GEN_DIR}. Run tools/regen.sh "
+                        "with your retail default.xbe, or pass -DNFSU2_GEN_DIR=<dir>, "
+                        "or run python tools/gen_stub.py for a stub/test build.")
 endif()
 
 # The Vulkan renderer (xboxrecomp nv2a_vk) instead of OpenGL. On the Switch it
@@ -85,14 +90,15 @@ if(IOS)
                                            src/ios/ios_import.m)
     set_source_files_properties(src/ios/ios_scene.m src/ios/ios_touch.m src/ios/ios_import.m
                                 PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-    target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2main "-framework UniformTypeIdentifiers")
+    target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2main "-framework UniformTypeIdentifiers" "-framework UIKit" "-framework GameController")
     set_target_properties(${PROJECT_NAME} PROPERTIES
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/ios/Info.plist.in"
         MACOSX_BUNDLE_GUI_IDENTIFIER "${NFSU2_IOS_BUNDLE_ID}"
         MACOSX_BUNDLE_BUNDLE_NAME "NFSU2"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1"
-        MACOSX_BUNDLE_BUNDLE_VERSION "1")
+        MACOSX_BUNDLE_BUNDLE_VERSION "1"
+        XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${CMAKE_CURRENT_SOURCE_DIR}/ios/nfsu2_recomp.entitlements")
 endif()
 
 # Movies: VP6 decoded by FFmpeg instead of the lifted On2 decoder

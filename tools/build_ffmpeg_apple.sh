@@ -27,7 +27,14 @@ TARGET="${1:-}"
 DEPS="${DEPS:-$HOME/nfsu2/deps}"
 IOS_MIN="${IOS_MIN:-16.0}"
 MACOS_MIN="${MACOS_MIN:-13.0}"
-JOBS="${JOBS:-$(sysctl -n hw.ncpu)}"
+JOBS="${JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)}"
+
+mkdir -p "$DEPS/src/ffmpeg"
+FFMPEG_URL="https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz"
+if [ -z "$(ls -d "$DEPS"/src/ffmpeg/ffmpeg-* 2>/dev/null | head -1)" ]; then
+    echo "==> Downloading FFmpeg 7.1.1..."
+    curl -fSL "$FFMPEG_URL" | tar -xf - -C "$DEPS/src/ffmpeg"
+fi
 SRC="$(ls -d "$DEPS"/src/ffmpeg/ffmpeg-* | head -1)"
 
 case "$TARGET" in
