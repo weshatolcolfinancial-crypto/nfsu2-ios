@@ -206,8 +206,14 @@ jobs:
           fi
 
           echo "Publishing release $RELEASE_TAG..."
-          gh release create "$RELEASE_TAG" build-ios/NFSU2-iOS.ipa \
-            --title "NFSU2 iOS $RELEASE_TAG" \
-            --notes-file /tmp/release_notes.md \
-            --target "${{ github.sha }}" 2>/dev/null || \
-          gh release upload "$RELEASE_TAG" build-ios/NFSU2-iOS.ipa --clobber
+          if gh release view "$RELEASE_TAG" &>/dev/null; then
+            echo "Release $RELEASE_TAG already exists. Uploading asset..."
+            gh release upload "$RELEASE_TAG" build-ios/NFSU2-iOS.ipa --clobber
+            gh release edit "$RELEASE_TAG" --notes-file /tmp/release_notes.md
+          else
+            echo "Creating release $RELEASE_TAG..."
+            gh release create "$RELEASE_TAG" build-ios/NFSU2-iOS.ipa \
+              --title "NFSU2 iOS $RELEASE_TAG" \
+              --notes-file /tmp/release_notes.md \
+              --target "${{ github.sha }}"
+          fi

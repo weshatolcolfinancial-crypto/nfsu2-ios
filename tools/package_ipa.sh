@@ -13,6 +13,17 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_PATH="${1:-$HERE/build-ios/Release-iphoneos/nfsu2_recomp.app}"
 IPA_PATH="${2:-$HERE/build-ios/NFSU2-iOS-unsigned.ipa}"
+
+case "$APP_PATH" in
+    /*) ;;
+    *) APP_PATH="$PWD/$APP_PATH" ;;
+esac
+
+case "$IPA_PATH" in
+    /*) ;;
+    *) IPA_PATH="$PWD/$IPA_PATH" ;;
+esac
+
 ENTITLEMENTS="$HERE/ios/nfsu2_recomp.entitlements"
 DEPS="${DEPS:-$HOME/nfsu2/deps/device}"
 
@@ -23,6 +34,7 @@ if [ ! -d "$APP_PATH" ]; then
 fi
 
 echo "==> Packaging iOS IPA from: $APP_PATH"
+echo "==> Destination IPA: $IPA_PATH"
 
 STAGE_DIR="$(mktemp -d -t nfsu2_ipa_XXXXXX)"
 PAYLOAD_DIR="$STAGE_DIR/Payload"
