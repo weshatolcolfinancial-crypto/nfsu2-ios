@@ -1,6 +1,6 @@
 name: Build iOS IPA and Release
 
-on:
+'on':
   workflow_dispatch:
     inputs:
       xbe_url:
@@ -181,29 +181,32 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          NOTES="### Need for Speed: Underground 2 — iOS Port (Metal / MoltenVK)
+          cat << 'EOF' > /tmp/release_notes.md
+          ### Need for Speed: Underground 2 — iOS Port (Metal / MoltenVK)
 
-**Automated iOS IPA Build**
+          **Automated iOS IPA Build**
 
-#### Installation
-1. Sideload **\`NFSU2-iOS.ipa\`** onto your iPhone or iPad using **AltStore**, **Sideloadly**, **TrollStore**, **LiveContainer**, **Scarlet**, or **Esign**.
-2. Place your extracted Xbox disc files in the app container (\`Documents/game/\`) or select the extracted folder via the in-app document picker on first boot.
+          #### Installation
+          1. Sideload **`NFSU2-iOS.ipa`** onto your iPhone or iPad using **AltStore**, **Sideloadly**, **TrollStore**, **LiveContainer**, **Scarlet**, or **Esign**.
+          2. Place your extracted Xbox disc files in the app container (`Documents/game/`) or select the extracted folder via the in-app document picker on first boot.
 
-#### Notes
-- **Renderer:** Native **Metal** (iOS 17+) with **MoltenVK** fallback (iOS 16+).
-- **Controls:** Touch overlay (floating virtual stick, pedals, face buttons) and physical controllers (Xbox, DualSense, MFi).
-- **Entitlements:** Expanded memory limit enabled (\`com.apple.developer.kernel.increased-memory-limit\`)."
+          #### Notes
+          - **Renderer:** Native **Metal** (iOS 17+) with **MoltenVK** fallback (iOS 16+).
+          - **Controls:** Touch overlay (floating virtual stick, pedals, face buttons) and physical controllers (Xbox, DualSense, MFi).
+          - **Entitlements:** Expanded memory limit enabled (`com.apple.developer.kernel.increased-memory-limit`).
+          EOF
 
           if [ "$IS_STUB_BUILD" = "1" ]; then
-            NOTES="$NOTES
+            cat << 'EOF' >> /tmp/release_notes.md
 
-> [!NOTE]
-> This IPA was built with pipeline verification stubs. To build with full game code, trigger the workflow providing \`xbe_url\` or \`gen_tar_url\` with your retail NTSC-U disc."
+          > [!NOTE]
+          > This IPA was built with pipeline verification stubs. To build with full game code, trigger the workflow providing `xbe_url` or `gen_tar_url` with your retail NTSC-U disc.
+          EOF
           fi
 
           echo "Publishing release $RELEASE_TAG..."
           gh release create "$RELEASE_TAG" build-ios/NFSU2-iOS.ipa \
             --title "NFSU2 iOS $RELEASE_TAG" \
-            --notes "$NOTES" \
+            --notes-file /tmp/release_notes.md \
             --target "${{ github.sha }}" 2>/dev/null || \
           gh release upload "$RELEASE_TAG" build-ios/NFSU2-iOS.ipa --clobber
