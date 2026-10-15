@@ -25,6 +25,9 @@ on:
         required: false
         default: "v0.1.0-ios"
   push:
+    branches:
+      - ios
+      - main
     tags:
       - 'v*'
 
