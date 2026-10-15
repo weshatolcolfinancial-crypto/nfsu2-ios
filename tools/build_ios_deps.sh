@@ -53,7 +53,7 @@ if [ "$TARGET" = "device" ]; then
         mkdir -p "$DEPS/src/moltenvk"
         curl -fSL "$MVK_IOS_URL" | tar -x -C "$DEPS/src/moltenvk"
     fi
-    MVK_SLICE="$(find "$DEPS/src/moltenvk" -type d -name "ios-arm64" 2>/dev/null | head -1)"
+    MVK_SLICE="$(find "$DEPS/src/moltenvk" -path "*/static/*" -name "ios-arm64" 2>/dev/null | head -1)"
     if [ -z "$MVK_SLICE" ]; then
         MVK_SLICE="$DEPS/src/moltenvk/MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64"
     fi
@@ -65,7 +65,7 @@ elif [ "$TARGET" = "sim" ]; then
         mkdir -p "$DEPS/src/moltenvk-sim"
         curl -fSL "$MVK_ALL_URL" | tar -x -C "$DEPS/src/moltenvk-sim"
     fi
-    MVK_SLICE="$(find "$DEPS/src/moltenvk-sim" -type d -name "ios-arm64_x86_64-simulator" 2>/dev/null | head -1)"
+    MVK_SLICE="$(find "$DEPS/src/moltenvk-sim" -path "*/static/*" -name "ios-arm64_x86_64-simulator" 2>/dev/null | head -1)"
     if [ -z "$MVK_SLICE" ]; then
         MVK_SLICE="$DEPS/src/moltenvk-sim/MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64_x86_64-simulator"
     fi
@@ -100,8 +100,16 @@ build glslang "$GLSLANG_SRC" -DBUILD_SHARED_LIBS=OFF -DENABLE_OPT=OFF \
     -DENABLE_GLSLANG_BINARIES=OFF -DGLSLANG_TESTS=OFF -DGLSLANG_ENABLE_INSTALL=ON \
     -DENABLE_HLSL=OFF -DENABLE_SPVREMAPPER=OFF
 
+MVK_LIB="$(find "$MVK_SRC_DIR" -path "*/static/*" -name "libMoltenVK.a" 2>/dev/null | head -1)"
+if [ -z "$MVK_LIB" ]; then
+    MVK_LIB="$(find "$MVK_SRC_DIR" -name "libMoltenVK.a" 2>/dev/null | head -1)"
+fi
+if [ -z "$MVK_LIB" ] && [ -f "$MVK_SLICE/libMoltenVK.a" ]; then
+    MVK_LIB="$MVK_SLICE/libMoltenVK.a"
+fi
+
 mkdir -p "$PREFIX/lib" "$PREFIX/include"
-cp "$MVK_SLICE/libMoltenVK.a" "$PREFIX/lib/"
+cp "$MVK_LIB" "$PREFIX/lib/libMoltenVK.a"
 
 MVK_INC="$(find "$MVK_SRC_DIR" -type d -name "include" 2>/dev/null | grep -v "xcframework" | head -1)"
 if [ -n "$MVK_INC" ] && [ -d "$MVK_INC/vulkan" ]; then
