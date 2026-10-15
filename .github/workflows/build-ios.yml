@@ -67,8 +67,8 @@ jobs:
 
       - name: Prepare Lifted Game Code (gen/)
         env:
-          INPUT_XBE_URL: ${{ github.event.inputs.xbe_url }}
-          INPUT_GEN_URL: ${{ github.event.inputs.gen_tar_url }}
+          INPUT_XBE_URL: ${{ inputs.xbe_url }}
+          INPUT_GEN_URL: ${{ inputs.gen_tar_url }}
           SECRET_XBE_URL: ${{ secrets.NFSU2_XBE_URL }}
           SECRET_GEN_URL: ${{ secrets.NFSU2_GEN_TAR_URL }}
           SECRET_GEN_BASE64: ${{ secrets.NFSU2_GEN_TAR_BASE64 }}
@@ -121,7 +121,7 @@ jobs:
 
       - name: Configure CMake for iOS (Metal + Vulkan)
         run: |
-          BUNDLE_ID="${{ github.event.inputs.bundle_id }}"
+          BUNDLE_ID="${{ inputs.bundle_id }}"
           if [ -z "$BUNDLE_ID" ]; then
             BUNDLE_ID="com.recomp.nfsu2x"
           fi
@@ -166,20 +166,18 @@ jobs:
           retention-days: 14
 
       - name: Determine Release Tag
-        if: ${{ github.event.inputs.create_release == 'true' || startsWith(github.ref, 'refs/tags/v') }}
         run: |
-          TAG="${{ github.ref_name }}"
+          TAG="${{ inputs.release_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="${{ github.ref_name }}"
+          fi
           if [ "$TAG" = "ios" ] || [ "$TAG" = "main" ] || [ -z "$TAG" ]; then
-            TAG="${{ github.event.inputs.release_tag }}"
-            if [ -z "$TAG" ]; then
-              TAG="v0.1.0-ios"
-            fi
+            TAG="v0.1.0-ios"
           fi
           echo "RELEASE_TAG=$TAG" >> $GITHUB_ENV
           echo "Release tag: $TAG"
 
       - name: Publish GitHub Release
-        if: ${{ github.event.inputs.create_release == 'true' || startsWith(github.ref, 'refs/tags/v') }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
