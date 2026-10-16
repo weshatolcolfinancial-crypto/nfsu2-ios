@@ -126,10 +126,34 @@ static void make_layer(void *arg)
     if (view)
         s_layer = SDL_Metal_GetLayer(view);
 #if TARGET_OS_IPHONE
-    if (s_layer)
+    if (s_layer) {
+        UIView *metalView = (__bridge UIView *)view;
+        UIWindow *win = metalView.window;
+        if (!win && s_win) {
+            SDL_SysWMinfo wm;
+            SDL_VERSION(&wm.version);
+            if (SDL_GetWindowWMInfo(s_win, &wm) && wm.subsystem == SDL_SYSWM_UIKIT)
+                win = wm.info.uikit.window;
+        }
+        if (win) {
+            metalView.frame = win.bounds;
+            metalView.autoresizingMask =
+                UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        }
+        CGFloat scale = [UIScreen mainScreen].nativeScale;
+        if (scale < 1.0) scale = [UIScreen mainScreen].scale;
+        if (scale < 1.0) scale = 2.0;
+        CAMetalLayer *layer = (__bridge CAMetalLayer *)s_layer;
+        layer.contentsScale = scale;
+        CGSize bsz = metalView.bounds.size;
+        if (bsz.width > 0 && bsz.height > 0)
+            layer.drawableSize = CGSizeMake(bsz.width * scale, bsz.height * scale);
+
         ios_touch_attach(s_win);        /* above the Metal view SDL just added */
+    }
 #endif
 }
+
 
 void *nv2a_mtl_host_layer(void)
 {
@@ -246,6 +270,7 @@ int main(int argc, char **argv)
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
     SDL_SetHint(SDL_HINT_IDLE_TIMER_DISABLED, "1");   /* no auto-lock during movies */
     SDL_SetHint(SDL_HINT_ACCELEROMETER_AS_JOYSTICK, "0");
+    SDL_SetHint(SDL_HINT_IOS_HIDE_HOME_INDICATOR, "1");
 #endif
     /* Controllers too: macOS delivers their arrival and input through the
      * main run loop, which only this thread pumps. */

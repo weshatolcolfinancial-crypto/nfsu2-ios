@@ -14,6 +14,12 @@
 #include <stdio.h>
 #include "ios_scene.h"
 
+@implementation UIViewController (NFSU2ModernScreen)
+- (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
+- (BOOL)prefersStatusBarHidden { return YES; }
+- (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }
+@end
+
 UIWindowScene *ios_window_scene(void)
 {
     /* On a device the scene connects a moment after launch (the simulator
@@ -46,8 +52,16 @@ int ios_attach_window_to_scene(SDL_Window *window)
     }
     uiwin.windowScene = scene;
     uiwin.frame = scene.coordinateSpace.bounds;
+    if (uiwin.rootViewController) {
+        uiwin.rootViewController.view.frame = uiwin.bounds;
+        uiwin.rootViewController.view.autoresizingMask =
+            UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [uiwin.rootViewController setNeedsUpdateOfHomeIndicatorAutoHidden];
+        [uiwin.rootViewController setNeedsStatusBarAppearanceUpdate];
+    }
     [uiwin makeKeyAndVisible];
     fprintf(stderr, "[ios] window attached to its scene (%.0fx%.0f points)\n",
             uiwin.frame.size.width, uiwin.frame.size.height);
     return 1;
 }
+

@@ -6,22 +6,17 @@
  * it through the ordinary SDL controller path (xinput_device.c), exactly as
  * it reads a DualSense, so nothing below the host knows about touch.
  *
- * Only one of the two is attached at a time: when a physical controller
- * connects, the overlay hides and the virtual controller is detached, so the
- * real one takes port 0; when the last one goes away, both come back.
- *
- *   left half        floating stick (left thumbstick): it centres where the
- *                    finger lands
- *   top left         D-pad
- *   top centre       BACK, START
- *   right            A B X Y, WHITE / BLACK (the shoulder buttons in SDL
- *                    terms), BRAKE (left trigger), GAS (right trigger)
- *
- * NFSU2_TOUCH=0 (Documents/nfsu2x_env.txt) turns the overlay off, =2 keeps
- * it on even with a controller (the virtual one then takes the next port).
- * The iOS Simulator always reports a controller of its own ("Gamepad").
- * Main thread only, like everything UIKit; SDL's joystick calls take SDL's
- * joystick lock, so the title's thread may read the controller meanwhile.
+ * Optimized for modern iPhones:
+ *   - Ergonomic racing layout: Gas (RT) and Brake (LT) pedals at bottom-right,
+ *     Action buttons A (Handbrake), X (NOS), B (Look Back), Y (Camera) placed
+ *     conveniently for one-thumb rolling/tapping.
+ *   - Floating analog stick on left half with smooth recentering.
+ *   - Compact D-Pad at top-left.
+ *   - Frosted-glass aesthetics with iconic Xbox colors and glowing feedback.
+ *   - Modern haptics using UIImpactFeedbackGenerator (heavy for pedals, medium
+ *     for action buttons).
+ *   - Dynamic screen mode switcher (16:9 Fit, Fullscreen Stretch, Zoom).
+ *   - Full safe-area awareness for Dynamic Island, notch, and home bar.
  */
 #import <UIKit/UIKit.h>
 #include <SDL.h>
@@ -29,36 +24,124 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
-enum CtlKind { CTL_BUTTON, CTL_TRIGGER };
+#include "ios_scene.h"
+
+enum CtlKind { CTL_BUTTON, CTL_TRIGGER, CTL_SPECIAL };
 
 typedef struct {
     enum CtlKind kind;
-    int          target;        /* SDL_GameControllerButton or _Axis */
+    int          target;        /* SDL_GameControllerButton, _Axis, or special ID */
     const char  *label;
-    int          round;         /* circle (face buttons) or rounded rect */
+    const char  *sublabel;     /* subtitle badge, e.g. "RT", "LT" */
+    int          round;         /* 1: circle, 0: rounded rect / capsule */
+    uint32_t     colorHex;      /* primary accent color RGB */
 } CtlDef;
 
-static const CtlDef k_ctls[] = {
-    { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_A,             "A",     1 },
-    { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_B,             "B",     1 },
-    { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_X,             "X",     1 },
-    { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_Y,             "Y",     1 },
-    { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_LEFTSHOULDER,  "WHITE", 0 },
-    { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, "BLACK", 0 },
-    { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_BACK,          "BACK",  0 },
-    { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_START,         "START", 0 },
-    { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_DPAD_UP,       "\u25B2\uFE0E", 0 },
-    { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_DPAD_DOWN,     "\u25BC\uFE0E", 0 },
-    { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_DPAD_LEFT,     "\u25C0\uFE0E", 0 },
-    { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_DPAD_RIGHT,    "\u25B6\uFE0E", 0 },
-    { CTL_TRIGGER, SDL_CONTROLLER_AXIS_TRIGGERLEFT,     "BRAKE", 0 },
-    { CTL_TRIGGER, SDL_CONTROLLER_AXIS_TRIGGERRIGHT,    "GAS",   0 },
+enum {
+    CTL_A = 0,
+    CTL_B,
+    CTL_X,
+    CTL_Y,
+    CTL_WHITE,
+    CTL_BLACK,
+    CTL_BACK,
+    CTL_START,
+    CTL_DPAD_UP,
+    CTL_DPAD_DOWN,
+    CTL_DPAD_LEFT,
+    CTL_DPAD_RIGHT,
+    CTL_BRAKE,
+    CTL_GAS,
+    CTL_SCREEN_MODE,
+    NCTL
 };
-enum { NCTL = sizeof k_ctls / sizeof k_ctls[0], CTL_STICK = -1 };
 
-/* The virtual controller: every button up to the D-pad and all six axes,
- * so SDL's automatic mapping numbers them exactly as the enums do. */
+static const CtlDef k_ctls[NCTL] = {
+    [CTL_A]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_A,             "A",       "",    1, 0x2ECC71 }, /* Xbox Green */
+    [CTL_B]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_B,             "B",       "",    1, 0xE74C3C }, /* Xbox Red */
+    [CTL_X]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_X,             "X",       "",    1, 0x3498DB }, /* Xbox Blue */
+    [CTL_Y]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_Y,             "Y",       "",    1, 0xF1C40F }, /* Xbox Yellow */
+    [CTL_WHITE]       = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_LEFTSHOULDER,  "WHITE",   "",    0, 0xEEEEEE }, /* White/Silver */
+    [CTL_BLACK]       = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, "BLACK",   "",    0, 0x5DADE2 }, /* Cyan/Black */
+    [CTL_BACK]        = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_BACK,          "BACK ⧏",  "",    0, 0xBDC3C7 }, /* Menu */
+    [CTL_START]       = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_START,         "START ⧐", "",    0, 0xBDC3C7 }, /* Menu */
+    [CTL_DPAD_UP]     = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_DPAD_UP,       "▲",       "",    0, 0x85C1E9 }, /* D-Pad */
+    [CTL_DPAD_DOWN]   = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_DPAD_DOWN,     "▼",       "",    0, 0x85C1E9 }, /* D-Pad */
+    [CTL_DPAD_LEFT]   = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_DPAD_LEFT,     "◀",       "",    0, 0x85C1E9 }, /* D-Pad */
+    [CTL_DPAD_RIGHT]  = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_DPAD_RIGHT,    "▶",       "",    0, 0x85C1E9 }, /* D-Pad */
+    [CTL_BRAKE]       = { CTL_TRIGGER, SDL_CONTROLLER_AXIS_TRIGGERLEFT,     "BRAKE",   "LT",  0, 0xFF3D00 }, /* Cherry Red */
+    [CTL_GAS]         = { CTL_TRIGGER, SDL_CONTROLLER_AXIS_TRIGGERRIGHT,    "GAS",     "RT",  0, 0x00E676 }, /* Electric Green */
+    [CTL_SCREEN_MODE] = { CTL_SPECIAL, 1001,                                "⛶ FULL",  "",    0, 0x00E5FF }, /* Cyan Aspect */
+};
+
+enum { CTL_STICK = -1 };
+
+/* ── Screen Presentation Mode ─────────────────────────────────────── */
+
+static int s_screen_mode = -1;
+
+static NSString *getDocumentsPath(void)
+{
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    return paths.firstObject;
+}
+
+int ios_get_screen_mode(void)
+{
+    if (s_screen_mode >= 0)
+        return s_screen_mode;
+
+    NSString *doc = getDocumentsPath();
+    if (doc) {
+        NSString *filePath = [doc stringByAppendingPathComponent:@"screen_mode.txt"];
+        NSError *err = nil;
+        NSString *content = [NSString stringWithContentsOfFile:filePath encoding:NSUTF8StringEncoding error:&err];
+        if (content && content.length > 0) {
+            int val = [content intValue];
+            if (val >= 0 && val <= 2) {
+                s_screen_mode = val;
+                return s_screen_mode;
+            }
+        }
+    }
+
+    const char *e = getenv("NFSU2_SCREEN_MODE");
+    if (!e) e = getenv("RECOMP_SCREEN_MODE");
+    if (e && *e >= '0' && *e <= '2') {
+        s_screen_mode = *e - '0';
+        return s_screen_mode;
+    }
+
+    /* Default to 1 (Fullscreen Stretch / Fill for modern iPhones) */
+    s_screen_mode = 1;
+    return s_screen_mode;
+}
+
+void ios_set_screen_mode(int mode)
+{
+    if (mode < 0 || mode > 2)
+        mode = 0;
+    s_screen_mode = mode;
+    NSString *doc = getDocumentsPath();
+    if (doc) {
+        NSString *filePath = [doc stringByAppendingPathComponent:@"screen_mode.txt"];
+        NSString *content = [NSString stringWithFormat:@"%d\n", s_screen_mode];
+        [content writeToFile:filePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+}
+
+int ios_cycle_screen_mode(void)
+{
+    int cur = ios_get_screen_mode();
+    int next = (cur + 1) % 3;
+    ios_set_screen_mode(next);
+    return next;
+}
+
+/* ── Virtual Game Controller ──────────────────────────────────────── */
+
 static SDL_Joystick *s_vpad;
 
 static void vpad_attach(void)
@@ -117,31 +200,37 @@ static void vpad_button(int button, int down)
         SDL_JoystickSetVirtualButton(s_vpad, button, down ? SDL_PRESSED : SDL_RELEASED);
 }
 
+static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
+{
+    CGFloat r = ((hex >> 16) & 0xFF) / 255.0;
+    CGFloat g = ((hex >> 8) & 0xFF) / 255.0;
+    CGFloat b = (hex & 0xFF) / 255.0;
+    return [UIColor colorWithRed:r green:g blue:b alpha:alpha];
+}
+
+/* ── NFSTouchView Interface ───────────────────────────────────────── */
+
 @interface NFSTouchView : UIView
 - (void)releaseAll;
+- (void)updateScreenModeLabel;
+- (void)showToast:(NSString *)msg;
 @end
 
 @implementation NFSTouchView {
     CAShapeLayer *_shape[NCTL];
     CATextLayer  *_text[NCTL];
+    CATextLayer  *_subtext[NCTL];
     CGRect        _frame[NCTL];
-    int           _held[NCTL];              /* touches holding each control */
+    int           _held[NCTL];
     CAShapeLayer *_stickBase, *_stickKnob;
     CGPoint       _stickHome, _stickCentre;
     CGFloat       _stickRadius;
     UITouch      *_stickTouch;
-    NSMapTable<UITouch *, NSNumber *> *_bound;   /* touch -> control index */
-    UIImpactFeedbackGenerator *_haptic;
-}
-
-static CAShapeLayer *make_shape(CALayer *parent)
-{
-    CAShapeLayer *l = [CAShapeLayer layer];
-    l.strokeColor = [UIColor colorWithWhite:1.0 alpha:0.55].CGColor;
-    l.fillColor = [UIColor colorWithWhite:1.0 alpha:0.12].CGColor;
-    l.lineWidth = 2.0;
-    [parent addSublayer:l];
-    return l;
+    NSMapTable<UITouch *, NSNumber *> *_bound;
+    UIImpactFeedbackGenerator *_hapticLight;
+    UIImpactFeedbackGenerator *_hapticMedium;
+    UIImpactFeedbackGenerator *_hapticHeavy;
+    UILabel      *_toastLabel;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame
@@ -153,93 +242,291 @@ static CAShapeLayer *make_shape(CALayer *parent)
     self.multipleTouchEnabled = YES;
     self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     _bound = [NSMapTable weakToStrongObjectsMapTable];
-    _haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+
+    _hapticLight = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    _hapticMedium = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    _hapticHeavy = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
+    [_hapticLight prepare];
+    [_hapticMedium prepare];
+    [_hapticHeavy prepare];
+
+    CGFloat scale = UIScreen.mainScreen.nativeScale;
+    if (scale < 1.0) scale = UIScreen.mainScreen.scale;
+
     for (int i = 0; i < NCTL; i++) {
-        _shape[i] = make_shape(self.layer);
+        _shape[i] = [CAShapeLayer layer];
+        _shape[i].strokeColor = colorFromHex(k_ctls[i].colorHex, 0.85).CGColor;
+        _shape[i].fillColor = colorFromHex(k_ctls[i].colorHex, 0.20).CGColor;
+        _shape[i].lineWidth = 2.0;
+        _shape[i].shadowColor = colorFromHex(k_ctls[i].colorHex, 1.0).CGColor;
+        _shape[i].shadowOffset = CGSizeZero;
+        _shape[i].shadowRadius = 8.0;
+        _shape[i].shadowOpacity = 0.0;
+        [self.layer addSublayer:_shape[i]];
+
         _text[i] = [CATextLayer layer];
         _text[i].string = [NSString stringWithUTF8String:k_ctls[i].label];
-        _text[i].fontSize = 13;
-        _text[i].font = (__bridge CFTypeRef)[UIFont boldSystemFontOfSize:13];   /* a CTFont */
-        _text[i].foregroundColor = [UIColor colorWithWhite:1.0 alpha:0.8].CGColor;
         _text[i].alignmentMode = kCAAlignmentCenter;
-        _text[i].contentsScale = UIScreen.mainScreen.scale;
+        _text[i].contentsScale = scale;
+        _text[i].foregroundColor = [UIColor colorWithWhite:1.0 alpha:0.95].CGColor;
+
+        if (k_ctls[i].round) {
+            _text[i].fontSize = 20;
+            _text[i].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:20 weight:UIFontWeightBold];
+        } else if (i == CTL_GAS || i == CTL_BRAKE) {
+            _text[i].fontSize = 16;
+            _text[i].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:16 weight:UIFontWeightHeavy];
+        } else if (i >= CTL_DPAD_UP && i <= CTL_DPAD_RIGHT) {
+            _text[i].fontSize = 18;
+            _text[i].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:18 weight:UIFontWeightBold];
+        } else {
+            _text[i].fontSize = 12;
+            _text[i].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:12 weight:UIFontWeightBold];
+        }
         [self.layer addSublayer:_text[i]];
+
+        if (k_ctls[i].sublabel && strlen(k_ctls[i].sublabel) > 0) {
+            _subtext[i] = [CATextLayer layer];
+            _subtext[i].string = [NSString stringWithUTF8String:k_ctls[i].sublabel];
+            _subtext[i].alignmentMode = kCAAlignmentCenter;
+            _subtext[i].contentsScale = scale;
+            _subtext[i].foregroundColor = [UIColor colorWithWhite:1.0 alpha:0.75].CGColor;
+            _subtext[i].fontSize = 12;
+            _subtext[i].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:12 weight:UIFontWeightBold];
+            [self.layer addSublayer:_subtext[i]];
+        }
     }
-    _stickBase = make_shape(self.layer);
-    _stickKnob = make_shape(self.layer);
+
+    /* Stick base and knob */
+    _stickBase = [CAShapeLayer layer];
+    _stickBase.strokeColor = [UIColor colorWithWhite:1.0 alpha:0.60].CGColor;
+    _stickBase.fillColor = [UIColor colorWithWhite:1.0 alpha:0.10].CGColor;
+    _stickBase.lineWidth = 2.0;
+    _stickBase.shadowColor = [UIColor colorWithRed:0.0 green:0.8 blue:1.0 alpha:0.6].CGColor;
+    _stickBase.shadowOffset = CGSizeZero;
+    _stickBase.shadowRadius = 6.0;
+    _stickBase.shadowOpacity = 0.5;
+    [self.layer addSublayer:_stickBase];
+
+    _stickKnob = [CAShapeLayer layer];
+    _stickKnob.strokeColor = [UIColor colorWithWhite:1.0 alpha:0.90].CGColor;
     _stickKnob.fillColor = [UIColor colorWithWhite:1.0 alpha:0.35].CGColor;
+    _stickKnob.lineWidth = 2.5;
+    _stickKnob.shadowColor = [UIColor colorWithWhite:1.0 alpha:0.8].CGColor;
+    _stickKnob.shadowOffset = CGSizeZero;
+    _stickKnob.shadowRadius = 8.0;
+    _stickKnob.shadowOpacity = 0.6;
+    [self.layer addSublayer:_stickKnob];
+
     return self;
 }
 
 - (void)placeControl:(int)i rect:(CGRect)r
 {
-    CGFloat lh = 16;
-
     _frame[i] = r;
+    CGFloat corner = k_ctls[i].round ? (r.size.width / 2) : 12;
+    if (i == CTL_GAS || i == CTL_BRAKE) corner = 20;
+    if (i == CTL_WHITE || i == CTL_BLACK || i == CTL_BACK || i == CTL_START || i == CTL_SCREEN_MODE) corner = 14;
+
     _shape[i].path = (k_ctls[i].round
                       ? [UIBezierPath bezierPathWithOvalInRect:r]
-                      : [UIBezierPath bezierPathWithRoundedRect:r cornerRadius:10]).CGPath;
-    _text[i].frame = CGRectMake(r.origin.x, CGRectGetMidY(r) - lh / 2, r.size.width, lh);
+                      : [UIBezierPath bezierPathWithRoundedRect:r cornerRadius:corner]).CGPath;
+
+    if (_subtext[i]) {
+        CGFloat th = 18, sh = 12;
+        CGFloat totalH = th + sh + 2;
+        CGFloat startY = CGRectGetMidY(r) - totalH / 2;
+        _text[i].frame = CGRectMake(r.origin.x, startY, r.size.width, th);
+        _subtext[i].frame = CGRectMake(r.origin.x, startY + th + 2, r.size.width, sh);
+    } else {
+        CGFloat lh = r.size.height * 0.55;
+        if (lh > 24) lh = 24;
+        _text[i].frame = CGRectMake(r.origin.x, CGRectGetMidY(r) - lh / 2, r.size.width, lh);
+    }
 }
 
 - (void)drawStick
 {
-    CGFloat r = _stickRadius, k = r * 0.45;
-    _stickBase.path = [UIBezierPath bezierPathWithOvalInRect:
-                       CGRectMake(_stickCentre.x - r, _stickCentre.y - r, 2 * r, 2 * r)].CGPath;
+    CGFloat r = _stickRadius, k = r * 0.42;
+
+    /* Base with cardinal tick marks (crosshair) */
+    UIBezierPath *basePath = [UIBezierPath bezierPathWithOvalInRect:
+                              CGRectMake(_stickCentre.x - r, _stickCentre.y - r, 2 * r, 2 * r)];
+    CGFloat tickLen = 8;
+    [basePath moveToPoint:CGPointMake(_stickCentre.x, _stickCentre.y - r)];
+    [basePath addLineToPoint:CGPointMake(_stickCentre.x, _stickCentre.y - r + tickLen)];
+    [basePath moveToPoint:CGPointMake(_stickCentre.x, _stickCentre.y + r)];
+    [basePath addLineToPoint:CGPointMake(_stickCentre.x, _stickCentre.y + r - tickLen)];
+    [basePath moveToPoint:CGPointMake(_stickCentre.x - r, _stickCentre.y)];
+    [basePath addLineToPoint:CGPointMake(_stickCentre.x - r + tickLen, _stickCentre.y)];
+    [basePath moveToPoint:CGPointMake(_stickCentre.x + r, _stickCentre.y)];
+    [basePath addLineToPoint:CGPointMake(_stickCentre.x + r - tickLen, _stickCentre.y)];
+    _stickBase.path = basePath.CGPath;
+
     if (!_stickTouch) {
         _stickKnob.path = [UIBezierPath bezierPathWithOvalInRect:
                            CGRectMake(_stickCentre.x - k, _stickCentre.y - k, 2 * k, 2 * k)].CGPath;
     }
 }
 
-/* Laid out in points inside the safe area, sized for a landscape phone. */
+- (void)updateScreenModeLabel
+{
+    int sm = ios_get_screen_mode();
+    NSString *txt = @"⛶ FULL";
+    if (sm == 0) txt = @"⛶ 16:9";
+    else if (sm == 2) txt = @"⛶ ZOOM";
+    _text[CTL_SCREEN_MODE].string = txt;
+}
+
+- (void)showToast:(NSString *)message
+{
+    if (!_toastLabel) {
+        _toastLabel = [[UILabel alloc] init];
+        _toastLabel.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.85];
+        _toastLabel.textColor = UIColor.whiteColor;
+        _toastLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+        _toastLabel.textAlignment = NSTextAlignmentCenter;
+        _toastLabel.layer.cornerRadius = 14;
+        _toastLabel.layer.masksToBounds = YES;
+        _toastLabel.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.3].CGColor;
+        _toastLabel.layer.borderWidth = 1.0;
+        [self addSubview:_toastLabel];
+    }
+    _toastLabel.text = message;
+    [_toastLabel sizeToFit];
+    CGFloat w = _toastLabel.bounds.size.width + 28;
+    CGFloat h = 32;
+    CGFloat top = self.safeAreaInsets.top + 46;
+    _toastLabel.frame = CGRectMake((self.bounds.size.width - w) / 2, top, w, h);
+    _toastLabel.alpha = 1.0;
+    _toastLabel.hidden = NO;
+
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideToast) object:nil];
+    [self performSelector:@selector(hideToast) withObject:nil afterDelay:1.4];
+}
+
+- (void)hideToast
+{
+    [UIView animateWithDuration:0.3 animations:^{
+        self->_toastLabel.alpha = 0.0;
+    } completion:^(BOOL finished) {
+        if (finished)
+            self->_toastLabel.hidden = YES;
+    }];
+}
+
+/* Laid out dynamically inside safe area insets for modern landscape iPhones. */
 - (void)layoutSubviews
 {
+    [super layoutSubviews];
+
     UIEdgeInsets in = self.safeAreaInsets;
-    CGFloat L = in.left + 16, R = self.bounds.size.width - in.right - 16;
-    CGFloat T = in.top + 12, B = self.bounds.size.height - MAX(in.bottom, 12);
-    CGFloat mid = self.bounds.size.width / 2, d = 44, f = 54, s = 40;
-    CGFloat dx = L + d * 1.5, dy = T + d * 1.5;         /* D-pad centre */
-    CGFloat fx = R - 150, fy = T + 92;                   /* face buttons centre */
+    CGFloat safeL = MAX(in.left, 16);
+    CGFloat safeR = self.bounds.size.width - MAX(in.right, 16);
+    CGFloat safeT = MAX(in.top, 8);
+    CGFloat safeB = self.bounds.size.height - MAX(in.bottom, 12);
+    CGFloat midX = self.bounds.size.width / 2;
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    [super layoutSubviews];
-    for (int i = 0; i < NCTL; i++) {
-        CGRect r = CGRectZero;
-        switch (k_ctls[i].target + (k_ctls[i].kind == CTL_TRIGGER ? 100 : 0)) {
-        case SDL_CONTROLLER_BUTTON_Y:             r = CGRectMake(fx - f / 2, fy - f * 1.35, f, f); break;
-        case SDL_CONTROLLER_BUTTON_A:             r = CGRectMake(fx - f / 2, fy + f * 0.35, f, f); break;
-        case SDL_CONTROLLER_BUTTON_X:             r = CGRectMake(fx - f * 1.35, fy - f / 2, f, f); break;
-        case SDL_CONTROLLER_BUTTON_B:             r = CGRectMake(fx + f * 0.35, fy - f / 2, f, f); break;
-        case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  r = CGRectMake(fx - f * 1.35 - 84, fy - s - 5, 60, s); break;
-        case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: r = CGRectMake(fx - f * 1.35 - 84, fy + 5, 60, s); break;
-        case SDL_CONTROLLER_BUTTON_BACK:          r = CGRectMake(mid - 84, T, 72, 32); break;
-        case SDL_CONTROLLER_BUTTON_START:         r = CGRectMake(mid + 12, T, 72, 32); break;
-        case SDL_CONTROLLER_BUTTON_DPAD_UP:       r = CGRectMake(dx - d / 2, dy - d * 1.5, d, d); break;
-        case SDL_CONTROLLER_BUTTON_DPAD_DOWN:     r = CGRectMake(dx - d / 2, dy + d * 0.5, d, d); break;
-        case SDL_CONTROLLER_BUTTON_DPAD_LEFT:     r = CGRectMake(dx - d * 1.5, dy - d / 2, d, d); break;
-        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:    r = CGRectMake(dx + d * 0.5, dy - d / 2, d, d); break;
-        case 100 + SDL_CONTROLLER_AXIS_TRIGGERRIGHT: r = CGRectMake(R - 100, B - 140, 100, 140); break;
-        case 100 + SDL_CONTROLLER_AXIS_TRIGGERLEFT:  r = CGRectMake(R - 216, B - 100, 100, 100); break;
-        }
-        [self placeControl:i rect:r];
-    }
-    _stickRadius = 64;
-    _stickHome = CGPointMake(L + _stickRadius + 40, B - _stickRadius - 16);
+
+    /* ── Right side: Ergonomic Racing Layout ── */
+    /* Gas Pedal (bottom-right) */
+    CGFloat w_gas = 78, h_gas = 126;
+    CGRect r_gas = CGRectMake(safeR - w_gas, safeB - h_gas, w_gas, h_gas);
+
+    /* Brake Pedal (to the left of Gas) */
+    CGFloat w_brake = 72, h_brake = 106;
+    CGRect r_brake = CGRectMake(safeR - w_gas - 14 - w_brake, safeB - h_brake, w_brake, h_brake);
+
+    /* Face Buttons Diamond (A, B, X, Y):
+     * Placed ergonomically above the pedals right where the right thumb rolls */
+    CGFloat f = 52;
+    CGFloat fx = safeR - 128;
+    CGFloat fy = safeB - 175;
+    CGFloat f_dist = 40;
+
+    CGRect r_y = CGRectMake(fx - f/2, fy - f_dist - f/2, f, f);          /* Y: Camera / Reset */
+    CGRect r_a = CGRectMake(fx - f/2, fy + f_dist - f/2, f, f);          /* A: Handbrake / Accept */
+    CGRect r_x = CGRectMake(fx - f_dist - f/2, fy - f/2, f, f);          /* X: NOS / Boost */
+    CGRect r_b = CGRectMake(fx + f_dist - f/2, fy - f/2, f, f);          /* B: Look Back / Cancel */
+
+    /* Shoulder buttons: White & Black at upper right */
+    CGFloat s_w = 62, s_h = 30;
+    CGRect r_white = CGRectMake(safeR - s_w * 2 - 12, safeT + 4, s_w, s_h);
+    CGRect r_black = CGRectMake(safeR - s_w, safeT + 4, s_w, s_h);
+
+    /* Top center controls: Back, Screen Mode, Start */
+    CGFloat top_h = 30;
+    CGRect r_back = CGRectMake(midX - 126, safeT + 4, 74, top_h);
+    CGRect r_screen = CGRectMake(midX - 44, safeT + 4, 88, top_h);
+    CGRect r_start = CGRectMake(midX + 52, safeT + 4, 74, top_h);
+
+    /* Left side: D-pad at upper left */
+    CGFloat d = 42;
+    CGFloat dx = safeL + 64, dy = safeT + 80;
+    CGFloat d_dist = 36;
+    CGRect r_dup = CGRectMake(dx - d/2, dy - d_dist - d/2, d, d);
+    CGRect r_ddn = CGRectMake(dx - d/2, dy + d_dist - d/2, d, d);
+    CGRect r_dl  = CGRectMake(dx - d_dist - d/2, dy - d/2, d, d);
+    CGRect r_dr  = CGRectMake(dx + d_dist - d/2, dy - d/2, d, d);
+
+    /* Place all controls */
+    [self placeControl:CTL_A rect:r_a];
+    [self placeControl:CTL_B rect:r_b];
+    [self placeControl:CTL_X rect:r_x];
+    [self placeControl:CTL_Y rect:r_y];
+    [self placeControl:CTL_WHITE rect:r_white];
+    [self placeControl:CTL_BLACK rect:r_black];
+    [self placeControl:CTL_BACK rect:r_back];
+    [self placeControl:CTL_START rect:r_start];
+    [self placeControl:CTL_DPAD_UP rect:r_dup];
+    [self placeControl:CTL_DPAD_DOWN rect:r_ddn];
+    [self placeControl:CTL_DPAD_LEFT rect:r_dl];
+    [self placeControl:CTL_DPAD_RIGHT rect:r_dr];
+    [self placeControl:CTL_BRAKE rect:r_brake];
+    [self placeControl:CTL_GAS rect:r_gas];
+    [self placeControl:CTL_SCREEN_MODE rect:r_screen];
+
+    [self updateScreenModeLabel];
+
+    /* Left analog stick (steering) */
+    _stickRadius = 66;
+    _stickHome = CGPointMake(safeL + 76, safeB - 76);
     if (!_stickTouch)
         _stickCentre = _stickHome;
     [self drawStick];
+
     [CATransaction commit];
 }
 
 - (int)controlAt:(CGPoint)p
 {
-    for (int i = 0; i < NCTL; i++)
-        if (CGRectContainsPoint(CGRectInset(_frame[i], -6, -6), p))
-            return i;
-    return p.x < self.bounds.size.width * 0.45 ? CTL_STICK : -2;
+    int best = -2;
+    CGFloat bestDist = 1e9;
+    for (int i = 0; i < NCTL; i++) {
+        CGFloat pad = 14;
+        if (i == CTL_GAS || i == CTL_BRAKE) pad = 12;
+        CGRect hitRect = CGRectInset(_frame[i], -pad, -pad);
+        if (CGRectContainsPoint(hitRect, p)) {
+            CGPoint center = CGPointMake(CGRectGetMidX(_frame[i]), CGRectGetMidY(_frame[i]));
+            CGFloat dx = p.x - center.x, dy = p.y - center.y;
+            CGFloat dist = dx * dx + dy * dy;
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = i;
+            }
+        }
+    }
+    if (best >= 0)
+        return best;
+
+    /* Left steering zone: left 48% of screen, below the top bar */
+    UIEdgeInsets in = self.safeAreaInsets;
+    if (p.x < self.bounds.size.width * 0.48 && p.y > MAX(in.top, 8) + 38)
+        return CTL_STICK;
+
+    return -2;
 }
 
 - (void)setHeld:(int)i delta:(int)delta
@@ -251,22 +538,53 @@ static CAShapeLayer *make_shape(CALayer *parent)
         _held[i] = 0;
     if ((_held[i] > 0) == was)
         return;
-    if (!was)
-        [_haptic impactOccurred];
-    if (k_ctls[i].kind == CTL_TRIGGER)
+
+    if (!was) {
+        if (i == CTL_GAS || i == CTL_BRAKE)
+            [_hapticHeavy impactOccurred];
+        else if (i == CTL_A || i == CTL_B || i == CTL_X || i == CTL_Y ||
+                 (i >= CTL_DPAD_UP && i <= CTL_DPAD_RIGHT))
+            [_hapticMedium impactOccurred];
+        else
+            [_hapticLight impactOccurred];
+    }
+
+    if (k_ctls[i].kind == CTL_SPECIAL) {
+        if (!was && k_ctls[i].target == 1001) {
+            int new_mode = ios_cycle_screen_mode();
+            [self updateScreenModeLabel];
+            const char *msg = "Screen: 16:9 Fit";
+            if (new_mode == 1) msg = "Screen: Fullscreen Fill";
+            else if (new_mode == 2) msg = "Screen: Zoom (No Bars)";
+            [self showToast:[NSString stringWithUTF8String:msg]];
+        }
+    } else if (k_ctls[i].kind == CTL_TRIGGER) {
         vpad_axis(k_ctls[i].target, was ? 0.0f : 1.0f);
-    else
+    } else {
         vpad_button(k_ctls[i].target, !was);
+    }
+
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    _shape[i].fillColor = [UIColor colorWithWhite:1.0 alpha:was ? 0.12 : 0.45].CGColor;
+    uint32_t color = k_ctls[i].colorHex;
+    if (!was) {
+        _shape[i].fillColor = colorFromHex(color, 0.65).CGColor;
+        _shape[i].strokeColor = colorFromHex(color, 1.0).CGColor;
+        _shape[i].lineWidth = 2.5;
+        _shape[i].shadowOpacity = 0.85;
+    } else {
+        _shape[i].fillColor = colorFromHex(color, 0.20).CGColor;
+        _shape[i].strokeColor = colorFromHex(color, 0.85).CGColor;
+        _shape[i].lineWidth = 2.0;
+        _shape[i].shadowOpacity = 0.0;
+    }
     [CATransaction commit];
 }
 
 - (void)moveStick:(CGPoint)p
 {
     CGFloat dx = p.x - _stickCentre.x, dy = p.y - _stickCentre.y;
-    CGFloat len = sqrt(dx * dx + dy * dy), r = _stickRadius, k = r * 0.45;
+    CGFloat len = sqrt(dx * dx + dy * dy), r = _stickRadius, k = r * 0.42;
 
     if (len > r) {
         dx *= r / len;
@@ -314,8 +632,6 @@ static CAShapeLayer *make_shape(CALayer *parent)
     }
 }
 
-/* A finger that slides from one control onto another (BRAKE to GAS, say)
- * moves the press with it; sliding off onto nothing keeps it held. */
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event
 {
     for (UITouch *t in touches) {
@@ -371,7 +687,6 @@ static CAShapeLayer *make_shape(CALayer *parent)
 static NFSTouchView *s_view;
 static int           s_always;          /* NFSU2_TOUCH=2 */
 
-/* A game controller that is not ours. */
 static int physical_controllers(void)
 {
     int n = 0;
@@ -405,8 +720,6 @@ void ios_touch_controllers_changed(void)
     fprintf(stderr, "[ios] touch controls %s\n", show ? "on" : "off (controller connected)");
 }
 
-/* Called once SDL's Metal view exists (the Vulkan surface is made on the
- * main thread), so the overlay goes on top of it. */
 void ios_touch_attach(SDL_Window *window)
 {
     SDL_SysWMinfo info;

@@ -3474,8 +3474,20 @@ static void vk_flip(void)
                 VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
                 if (xbox_video_widescreen() && lw < lh * 1.5f)
                     lw = lh * 16.0f / 9.0f;
-                scale = ww / lw < wh / lh ? ww / lw : wh / lh;
-                dw = (int)(lw * scale); dh = (int)(lh * scale);
+#if TARGET_OS_IPHONE
+                extern int ios_get_screen_mode(void);
+                int smode = ios_get_screen_mode();
+                if (smode == 1) {
+                    dw = (int)ww; dh = (int)wh;
+                } else if (smode == 2) {
+                    scale = ww / lw > wh / lh ? ww / lw : wh / lh;
+                    dw = (int)(lw * scale); dh = (int)(lh * scale);
+                } else
+#endif
+                {
+                    scale = ww / lw < wh / lh ? ww / lw : wh / lh;
+                    dw = (int)(lw * scale); dh = (int)(lh * scale);
+                }
                 dx = ((int)ww - dw) / 2; dy = ((int)wh - dh) / 2;
                 mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
                 mb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;

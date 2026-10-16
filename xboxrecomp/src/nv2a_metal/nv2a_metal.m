@@ -2705,11 +2705,28 @@ static void dump_surface(MtSurf *s, const char *path)
     dump_bmp(path, (const uint8_t *)buf.contents, s->pw, s->ph);
 }
 
+#if TARGET_OS_IPHONE
+extern int ios_get_screen_mode(void);
+#endif
+
 static void present(MtSurf *s)
 {
     id<CAMetalDrawable> drawable;
     CGSize ds;
     nv2a_mtl_host_gate();
+#if TARGET_OS_IPHONE
+    if (s_layer) {
+        CGSize viewSize = s_layer.bounds.size;
+        CGFloat scale = s_layer.contentsScale;
+        if (scale <= 0.0) scale = [UIScreen mainScreen].nativeScale;
+        if (scale < 1.0) scale = 2.0;
+        CGSize targetSize = CGSizeMake(viewSize.width * scale, viewSize.height * scale);
+        if (targetSize.width > 0 && targetSize.height > 0 &&
+            (s_layer.drawableSize.width != targetSize.width || s_layer.drawableSize.height != targetSize.height)) {
+            s_layer.drawableSize = targetSize;
+        }
+    }
+#endif
     ds = s_layer.drawableSize;
     if (ds.width < 1 || ds.height < 1)
         return;
@@ -2717,13 +2734,30 @@ static void present(MtSurf *s)
     if (!drawable)
         return;
     if (s && s_drew_any) {
-        /* The logical aspect (16:9 for a widescreen title), letterboxed. */
+        /* The logical aspect (16:9 for a widescreen title), letterboxed or scaled. */
         double lw = (double)s->w / s->aa_sx, lh = (double)s->h / s->aa_sy;
         double ww = ds.width, wh = ds.height, scale, dw, dh;
         if (xbox_video_widescreen() && lw < lh * 1.5)
             lw = lh * 16.0 / 9.0;
-        scale = ww / lw < wh / lh ? ww / lw : wh / lh;
-        dw = (double)(int)(lw * scale); dh = (double)(int)(lh * scale);
+#if TARGET_OS_IPHONE
+        int smode = ios_get_screen_mode();
+        if (smode == 1) {
+            /* Mode 1: Fullscreen Stretch (Edge-to-Edge Fill on modern OLED screens) */
+            dw = ww;
+            dh = wh;
+        } else if (smode == 2) {
+            /* Mode 2: Zoom (Aspect Fill without distortion, fills width, slight top/bottom crop) */
+            scale = ww / lw > wh / lh ? ww / lw : wh / lh;
+            dw = (double)(int)(lw * scale);
+            dh = (double)(int)(lh * scale);
+        } else
+#endif
+        {
+            /* Mode 0: Fit (Standard 16:9 Letterboxed) */
+            scale = ww / lw < wh / lh ? ww / lw : wh / lh;
+            dw = (double)(int)(lw * scale);
+            dh = (double)(int)(lh * scale);
+        }
         draw_copy(s->tex, s->pw, s->ph, drawable.texture, 0, 1,
                   (double)(((int)ww - (int)dw) / 2), (double)(((int)wh - (int)dh) / 2), dw, dh);
     } else {
