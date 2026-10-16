@@ -7,15 +7,17 @@
  * it reads a DualSense, so nothing below the host knows about touch.
  *
  * Optimized for modern iPhones:
- *   - Ergonomic racing layout: Gas (RT) and Brake (LT) pedals at bottom-right,
- *     Action buttons A (Handbrake), X (NOS), B (Look Back), Y (Camera) placed
- *     conveniently for one-thumb rolling/tapping.
- *   - Floating analog stick on left half with smooth recentering.
- *   - Compact D-Pad at top-left.
- *   - Frosted-glass aesthetics with iconic Xbox colors and glowing feedback.
- *   - Modern haptics using UIImpactFeedbackGenerator (heavy for pedals, medium
- *     for action buttons).
- *   - Dynamic screen mode switcher (16:9 Fit, Fullscreen Stretch, Zoom).
+ *   - Dual Layout Modes:
+ *       • MENU MODE (Normal Xbox Layout): Classic A/B/X/Y diamond on the right
+ *         and standard D-pad on the left for clean, uncluttered menu navigation.
+ *       • RACE MODE (Racing Two-Column Layout): Gas (RT) and Brake (LT) pedals,
+ *         dedicated ⚡ NOS (X) boost button, E-BRAKE (A) drift button, Look Back (B),
+ *         Camera (Y), and 🎵 Music / 🗺 Map auxiliary buttons.
+ *   - Steering Modes:
+ *       • ANALOG STICK: Floating, self-centering thumbstick on left side.
+ *       • ARROW BUTTONS: Large dedicated ◀ and ▶ steering pads at bottom-left.
+ *   - Modern Frosted-Glass Aesthetics with iconic Xbox colors and Taptic rumble.
+ *   - Screen Mode Aspect Switcher (16:9 Fit, Fullscreen Stretch, Zoom).
  *   - Full safe-area awareness for Dynamic Island, notch, and home bar.
  */
 #import <UIKit/UIKit.h>
@@ -55,16 +57,20 @@ enum {
     CTL_BRAKE,
     CTL_GAS,
     CTL_SCREEN_MODE,
+    CTL_LAYOUT_MODE,
+    CTL_STEER_MODE,
+    CTL_STEER_LEFT,
+    CTL_STEER_RIGHT,
     NCTL
 };
 
 static const CtlDef k_ctls[NCTL] = {
-    [CTL_A]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_A,             "E-BRAKE", "A",   0, 0x2ECC71 }, /* Handbrake / Accept */
-    [CTL_B]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_B,             "LOOK",    "B",   0, 0xE74C3C }, /* Look Back / Cancel */
-    [CTL_X]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_X,             "⚡ NOS",  "X",   0, 0x00E5FF }, /* Nitrous Oxide Boost */
-    [CTL_Y]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_Y,             "CAM",     "Y",   0, 0xF1C40F }, /* Camera View / Reset */
-    [CTL_WHITE]       = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_LEFTSHOULDER,  "🎵 MUSIC","LB",  0, 0xEEEEEE }, /* EA Trax Music Track (White/LB) */
-    [CTL_BLACK]       = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, "🗺 MAP",  "RB",  0, 0x4A90E2 }, /* In-Game GPS Map (Black/RB) */
+    [CTL_A]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_A,             "A",       "",    1, 0x2ECC71 }, /* Xbox Green */
+    [CTL_B]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_B,             "B",       "",    1, 0xE74C3C }, /* Xbox Red */
+    [CTL_X]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_X,             "X",       "",    1, 0x3498DB }, /* Xbox Blue */
+    [CTL_Y]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_Y,             "Y",       "",    1, 0xF1C40F }, /* Xbox Yellow */
+    [CTL_WHITE]       = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_LEFTSHOULDER,  "🎵 MUSIC","LB",  0, 0xEEEEEE }, /* EA Trax (White/LB) */
+    [CTL_BLACK]       = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, "🗺 MAP",  "RB",  0, 0x4A90E2 }, /* GPS Map (Black/RB) */
     [CTL_BACK]        = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_BACK,          "BACK ⧏", "",    0, 0xBDC3C7 }, /* Menu / Map */
     [CTL_START]       = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_START,         "START ⧐","",    0, 0xBDC3C7 }, /* Menu Pause */
     [CTL_DPAD_UP]     = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_DPAD_UP,       "▲",       "",    0, 0x85C1E9 }, /* D-Pad */
@@ -74,13 +80,19 @@ static const CtlDef k_ctls[NCTL] = {
     [CTL_BRAKE]       = { CTL_TRIGGER, SDL_CONTROLLER_AXIS_TRIGGERLEFT,     "BRAKE",   "LT",  0, 0xFF3D00 }, /* Cherry Red */
     [CTL_GAS]         = { CTL_TRIGGER, SDL_CONTROLLER_AXIS_TRIGGERRIGHT,    "GAS",     "RT",  0, 0x00E676 }, /* Electric Green */
     [CTL_SCREEN_MODE] = { CTL_SPECIAL, 1001,                                "⛶ FULL",  "",    0, 0x00E5FF }, /* Aspect Mode */
+    [CTL_LAYOUT_MODE] = { CTL_SPECIAL, 1004,                                "🎮 MENU",  "",    0, 0xF39C12 }, /* Menu / Race Toggle */
+    [CTL_STEER_MODE]  = { CTL_SPECIAL, 1005,                                "🕹️ STICK", "",    0, 0x9B59B6 }, /* Stick / Arrows Toggle */
+    [CTL_STEER_LEFT]  = { CTL_SPECIAL, 1002,                                "◀",       "STEER",0, 0x00E5FF }, /* Steer Left Button */
+    [CTL_STEER_RIGHT] = { CTL_SPECIAL, 1003,                                "▶",       "STEER",0, 0x00E5FF }, /* Steer Right Button */
 };
 
 enum { CTL_STICK = -1 };
 
-/* ── Screen Presentation Mode ─────────────────────────────────────── */
+/* ── Settings Persistence (Screen Mode, Layout Mode, Steering Mode) ── */
 
 static int s_screen_mode = -1;
+static int s_layout_mode = -1;
+static int s_steer_mode = -1;
 
 static NSString *getDocumentsPath(void)
 {
@@ -114,8 +126,7 @@ int ios_get_screen_mode(void)
         return s_screen_mode;
     }
 
-    /* Default to 1 (Fullscreen Stretch / Fill for modern iPhones) */
-    s_screen_mode = 1;
+    s_screen_mode = 1; /* Default: Fullscreen Stretch */
     return s_screen_mode;
 }
 
@@ -138,6 +149,68 @@ int ios_cycle_screen_mode(void)
     int next = (cur + 1) % 3;
     ios_set_screen_mode(next);
     return next;
+}
+
+static int ios_get_layout_mode(void)
+{
+    if (s_layout_mode >= 0)
+        return s_layout_mode;
+    NSString *doc = getDocumentsPath();
+    if (doc) {
+        NSString *filePath = [doc stringByAppendingPathComponent:@"layout_mode.txt"];
+        NSString *content = [NSString stringWithContentsOfFile:filePath encoding:NSUTF8StringEncoding error:nil];
+        if (content && content.length > 0) {
+            int val = [content intValue];
+            if (val == 0 || val == 1) {
+                s_layout_mode = val;
+                return s_layout_mode;
+            }
+        }
+    }
+    s_layout_mode = 0; /* Default: Menu Layout on launch */
+    return s_layout_mode;
+}
+
+static void ios_set_layout_mode(int mode)
+{
+    s_layout_mode = mode ? 1 : 0;
+    NSString *doc = getDocumentsPath();
+    if (doc) {
+        NSString *filePath = [doc stringByAppendingPathComponent:@"layout_mode.txt"];
+        NSString *content = [NSString stringWithFormat:@"%d\n", s_layout_mode];
+        [content writeToFile:filePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+}
+
+static int ios_get_steer_mode(void)
+{
+    if (s_steer_mode >= 0)
+        return s_steer_mode;
+    NSString *doc = getDocumentsPath();
+    if (doc) {
+        NSString *filePath = [doc stringByAppendingPathComponent:@"steer_mode.txt"];
+        NSString *content = [NSString stringWithContentsOfFile:filePath encoding:NSUTF8StringEncoding error:nil];
+        if (content && content.length > 0) {
+            int val = [content intValue];
+            if (val == 0 || val == 1) {
+                s_steer_mode = val;
+                return s_steer_mode;
+            }
+        }
+    }
+    s_steer_mode = 0; /* Default: Analog Stick */
+    return s_steer_mode;
+}
+
+static void ios_set_steer_mode(int mode)
+{
+    s_steer_mode = mode ? 1 : 0;
+    NSString *doc = getDocumentsPath();
+    if (doc) {
+        NSString *filePath = [doc stringByAppendingPathComponent:@"steer_mode.txt"];
+        NSString *content = [NSString stringWithFormat:@"%d\n", s_steer_mode];
+        [content writeToFile:filePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
 }
 
 /* ── Virtual Game Controller ──────────────────────────────────────── */
@@ -212,7 +285,7 @@ static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
 
 @interface NFSTouchView : UIView
 - (void)releaseAll;
-- (void)updateScreenModeLabel;
+- (void)updateTopBarLabels;
 - (void)showToast:(NSString *)msg;
 @end
 
@@ -222,6 +295,8 @@ static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
     CATextLayer  *_subtext[NCTL];
     CGRect        _frame[NCTL];
     int           _held[NCTL];
+    int           _layout_mode;     /* 0: MENU, 1: RACE */
+    int           _steer_mode;      /* 0: STICK, 1: ARROWS */
     CAShapeLayer *_stickBase, *_stickKnob;
     CGPoint       _stickHome, _stickCentre;
     CGFloat       _stickRadius;
@@ -242,6 +317,9 @@ static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
     self.multipleTouchEnabled = YES;
     self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     _bound = [NSMapTable weakToStrongObjectsMapTable];
+
+    _layout_mode = ios_get_layout_mode();
+    _steer_mode = ios_get_steer_mode();
 
     _hapticLight = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     _hapticMedium = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
@@ -269,26 +347,13 @@ static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
         _text[i].alignmentMode = kCAAlignmentCenter;
         _text[i].contentsScale = scale;
         _text[i].foregroundColor = [UIColor colorWithWhite:1.0 alpha:0.95].CGColor;
-
-        if (i == CTL_X) {
-            _text[i].fontSize = 17;
-            _text[i].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:17 weight:UIFontWeightHeavy];
-        } else if (i == CTL_A) {
-            _text[i].fontSize = 13;
-            _text[i].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:13 weight:UIFontWeightHeavy];
-        } else if (i == CTL_B || i == CTL_Y) {
-            _text[i].fontSize = 13;
-            _text[i].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:13 weight:UIFontWeightBold];
-        } else if (i == CTL_GAS || i == CTL_BRAKE) {
-            _text[i].fontSize = 16;
-            _text[i].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:16 weight:UIFontWeightHeavy];
-        } else if (i >= CTL_DPAD_UP && i <= CTL_DPAD_RIGHT) {
-            _text[i].fontSize = 18;
-            _text[i].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:18 weight:UIFontWeightBold];
-        } else {
-            _text[i].fontSize = 12;
-            _text[i].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:12 weight:UIFontWeightBold];
-        }
+        CGFloat fsize = 14;
+        if (i == CTL_BACK || i == CTL_START || i == CTL_LAYOUT_MODE ||
+            i == CTL_STEER_MODE || i == CTL_SCREEN_MODE ||
+            i == CTL_WHITE || i == CTL_BLACK)
+            fsize = 12;
+        _text[i].fontSize = fsize;
+        _text[i].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:fsize weight:UIFontWeightBold];
         [self.layer addSublayer:_text[i]];
 
         if (k_ctls[i].sublabel && strlen(k_ctls[i].sublabel) > 0) {
@@ -330,15 +395,29 @@ static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
 - (void)placeControl:(int)i rect:(CGRect)r
 {
     _frame[i] = r;
+    if (CGRectIsEmpty(r)) {
+        _shape[i].hidden = YES;
+        _text[i].hidden = YES;
+        if (_subtext[i]) _subtext[i].hidden = YES;
+        return;
+    }
+    _shape[i].hidden = NO;
+    _text[i].hidden = NO;
+
     CGFloat corner = 14;
     if (i == CTL_GAS || i == CTL_BRAKE) corner = 20;
+    else if (i == CTL_STEER_LEFT || i == CTL_STEER_RIGHT) corner = 18;
+    else if (_layout_mode == 0 && (i == CTL_A || i == CTL_B || i == CTL_X || i == CTL_Y))
+        corner = r.size.width / 2;
     else if (i == CTL_X || i == CTL_A) corner = 16;
     else if (i == CTL_B || i == CTL_Y) corner = 14;
-    else if (i == CTL_WHITE || i == CTL_BLACK || i == CTL_BACK || i == CTL_START || i == CTL_SCREEN_MODE) corner = 14;
 
-    _shape[i].path = [UIBezierPath bezierPathWithRoundedRect:r cornerRadius:corner].CGPath;
+    UIBezierPath *path = (corner >= r.size.width / 2 - 1)
+        ? [UIBezierPath bezierPathWithOvalInRect:r]
+        : [UIBezierPath bezierPathWithRoundedRect:r cornerRadius:corner];
+    _shape[i].path = path.CGPath;
 
-    if (_subtext[i]) {
+    if (_subtext[i] && !_subtext[i].hidden) {
         CGFloat th = 18, sh = 12;
         CGFloat totalH = th + sh + 2;
         CGFloat startY = CGRectGetMidY(r) - totalH / 2;
@@ -346,7 +425,7 @@ static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
         _subtext[i].frame = CGRectMake(r.origin.x, startY + th + 2, r.size.width, sh);
     } else {
         CGFloat lh = r.size.height * 0.55;
-        if (lh > 24) lh = 24;
+        if (lh > 36) lh = 36;
         _text[i].frame = CGRectMake(r.origin.x, CGRectGetMidY(r) - lh / 2, r.size.width, lh);
     }
 }
@@ -375,13 +454,16 @@ static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
     }
 }
 
-- (void)updateScreenModeLabel
+- (void)updateTopBarLabels
 {
     int sm = ios_get_screen_mode();
-    NSString *txt = @"⛶ FULL";
-    if (sm == 0) txt = @"⛶ 16:9";
-    else if (sm == 2) txt = @"⛶ ZOOM";
-    _text[CTL_SCREEN_MODE].string = txt;
+    NSString *txt_s = @"⛶ FULL";
+    if (sm == 0) txt_s = @"⛶ 16:9";
+    else if (sm == 2) txt_s = @"⛶ ZOOM";
+    _text[CTL_SCREEN_MODE].string = txt_s;
+
+    _text[CTL_LAYOUT_MODE].string = _layout_mode ? @"🏎️ RACE" : @"🎮 MENU";
+    _text[CTL_STEER_MODE].string  = _steer_mode ? @"◀▶ KEYS" : @"🕹️ STICK";
 }
 
 - (void)showToast:(NSString *)message
@@ -436,77 +518,197 @@ static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
 
-    /* ── Right side: Ergonomic Two-Column Racing Layout ── */
-    /* Gas Pedal (bottom-right) */
-    CGFloat w_gas = 80, h_gas = 120;
-    CGRect r_gas = CGRectMake(safeR - w_gas, safeB - h_gas, w_gas, h_gas);
-
-    /* Brake Pedal (to the left of Gas) */
-    CGFloat w_brake = 76, h_brake = 105;
-    CGRect r_brake = CGRectMake(safeR - w_gas - 14 - w_brake, safeB - h_brake, w_brake, h_brake);
-
-    /* ⚡ NOS (X) - Prominent, glowing Nitrous Oxide boost button directly above Gas */
-    CGFloat h_nos = 52;
-    CGRect r_nos = CGRectMake(safeR - w_gas, safeB - h_gas - 12 - h_nos, w_gas, h_nos);
-
-    /* E-BRAKE (A) - Handbrake button directly above Brake */
-    CGFloat h_a = 52;
-    CGRect r_a = CGRectMake(safeR - w_gas - 14 - w_brake, safeB - h_brake - 12 - h_a, w_brake, h_a);
-
-    /* LOOK BACK (B) - Directly above NOS */
-    CGFloat h_b = 44;
-    CGRect r_b = CGRectMake(safeR - w_gas, safeB - h_gas - 12 - h_nos - 10 - h_b, w_gas, h_b);
-
-    /* CAMERA (Y) - Directly above E-BRAKE */
-    CGFloat h_y = 44;
-    CGRect r_y = CGRectMake(safeR - w_gas - 14 - w_brake, safeB - h_brake - 12 - h_a - 10 - h_y, w_brake, h_y);
-
-    /* Shoulder buttons: 🎵 MUSIC (White/LB) & 🗺 MAP (Black/RB) at upper right */
-    CGFloat s_w = 78, s_h = 30;
-    CGRect r_white = CGRectMake(safeR - s_w * 2 - 10, safeT + 4, s_w, s_h);
-    CGRect r_black = CGRectMake(safeR - s_w, safeT + 4, s_w, s_h);
-
-    /* Top center controls: Back, Screen Mode, Start */
+    /* ── Top Bar Controls (5 capsules centered) ── */
     CGFloat top_h = 30;
-    CGRect r_back = CGRectMake(midX - 126, safeT + 4, 74, top_h);
-    CGRect r_screen = CGRectMake(midX - 44, safeT + 4, 88, top_h);
-    CGRect r_start = CGRectMake(midX + 52, safeT + 4, 74, top_h);
+    CGRect r_back   = CGRectMake(midX - 200, safeT + 4, 68, top_h);
+    CGRect r_start  = CGRectMake(midX - 126, safeT + 4, 68, top_h);
+    CGRect r_layout = CGRectMake(midX - 52, safeT + 4, 82, top_h);
+    CGRect r_steer  = CGRectMake(midX + 36, safeT + 4, 84, top_h);
+    CGRect r_screen = CGRectMake(midX + 126, safeT + 4, 76, top_h);
 
-    /* Left side: D-pad at upper left */
-    CGFloat d = 42;
-    CGFloat dx = safeL + 64, dy = safeT + 80;
-    CGFloat d_dist = 36;
-    CGRect r_dup = CGRectMake(dx - d/2, dy - d_dist - d/2, d, d);
-    CGRect r_ddn = CGRectMake(dx - d/2, dy + d_dist - d/2, d, d);
-    CGRect r_dl  = CGRectMake(dx - d_dist - d/2, dy - d/2, d, d);
-    CGRect r_dr  = CGRectMake(dx + d_dist - d/2, dy - d/2, d, d);
-
-    /* Place all controls */
-    [self placeControl:CTL_A rect:r_a];
-    [self placeControl:CTL_B rect:r_b];
-    [self placeControl:CTL_X rect:r_nos];
-    [self placeControl:CTL_Y rect:r_y];
-    [self placeControl:CTL_WHITE rect:r_white];
-    [self placeControl:CTL_BLACK rect:r_black];
     [self placeControl:CTL_BACK rect:r_back];
     [self placeControl:CTL_START rect:r_start];
-    [self placeControl:CTL_DPAD_UP rect:r_dup];
-    [self placeControl:CTL_DPAD_DOWN rect:r_ddn];
-    [self placeControl:CTL_DPAD_LEFT rect:r_dl];
-    [self placeControl:CTL_DPAD_RIGHT rect:r_dr];
-    [self placeControl:CTL_BRAKE rect:r_brake];
-    [self placeControl:CTL_GAS rect:r_gas];
+    [self placeControl:CTL_LAYOUT_MODE rect:r_layout];
+    [self placeControl:CTL_STEER_MODE rect:r_steer];
     [self placeControl:CTL_SCREEN_MODE rect:r_screen];
 
-    [self updateScreenModeLabel];
+    if (_layout_mode == 0) {
+        /* ══════════════════════════════════════════
+         * MODE 0: NORMAL MENU LAYOUT
+         * Clean classic Xbox diamond, D-pad, no pedals
+         * ══════════════════════════════════════════ */
+        [self placeControl:CTL_GAS rect:CGRectZero];
+        [self placeControl:CTL_BRAKE rect:CGRectZero];
+        [self placeControl:CTL_WHITE rect:CGRectZero];
+        [self placeControl:CTL_BLACK rect:CGRectZero];
+        [self placeControl:CTL_STEER_LEFT rect:CGRectZero];
+        [self placeControl:CTL_STEER_RIGHT rect:CGRectZero];
 
-    /* Left analog stick (steering) */
-    _stickRadius = 66;
-    _stickHome = CGPointMake(safeL + 76, safeB - 76);
-    if (!_stickTouch)
-        _stickCentre = _stickHome;
-    [self drawStick];
+        /* Classic Xbox Diamond on the right */
+        CGFloat f = 56; /* diameter */
+        CGFloat fx = safeR - 110;
+        CGFloat fy = safeB - 110;
+        CGFloat f_dist = 48;
 
+        CGRect r_y = CGRectMake(fx - f/2, fy - f_dist - f/2, f, f);
+        CGRect r_a = CGRectMake(fx - f/2, fy + f_dist - f/2, f, f);
+        CGRect r_x = CGRectMake(fx - f_dist - f/2, fy - f/2, f, f);
+        CGRect r_b = CGRectMake(fx + f_dist - f/2, fy - f/2, f, f);
+
+        _text[CTL_A].string = @"A";
+        _text[CTL_B].string = @"B";
+        _text[CTL_X].string = @"X";
+        _text[CTL_Y].string = @"Y";
+        _text[CTL_A].fontSize = 22;
+        _text[CTL_B].fontSize = 22;
+        _text[CTL_X].fontSize = 22;
+        _text[CTL_Y].fontSize = 22;
+        _text[CTL_A].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:22 weight:UIFontWeightBold];
+        _text[CTL_B].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:22 weight:UIFontWeightBold];
+        _text[CTL_X].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:22 weight:UIFontWeightBold];
+        _text[CTL_Y].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:22 weight:UIFontWeightBold];
+        if (_subtext[CTL_A]) _subtext[CTL_A].hidden = YES;
+        if (_subtext[CTL_B]) _subtext[CTL_B].hidden = YES;
+        if (_subtext[CTL_X]) _subtext[CTL_X].hidden = YES;
+        if (_subtext[CTL_Y]) _subtext[CTL_Y].hidden = YES;
+
+        [self placeControl:CTL_A rect:r_a];
+        [self placeControl:CTL_B rect:r_b];
+        [self placeControl:CTL_X rect:r_x];
+        [self placeControl:CTL_Y rect:r_y];
+
+        /* D-Pad on the left for menu navigation */
+        CGFloat d = 48;
+        CGFloat dx = safeL + 80, dy = safeB - 110;
+        CGFloat d_dist = 42;
+        CGRect r_dup = CGRectMake(dx - d/2, dy - d_dist - d/2, d, d);
+        CGRect r_ddn = CGRectMake(dx - d/2, dy + d_dist - d/2, d, d);
+        CGRect r_dl  = CGRectMake(dx - d_dist - d/2, dy - d/2, d, d);
+        CGRect r_dr  = CGRectMake(dx + d_dist - d/2, dy - d/2, d, d);
+
+        for (int b = CTL_DPAD_UP; b <= CTL_DPAD_RIGHT; b++) {
+            _text[b].fontSize = 22;
+            _text[b].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:22 weight:UIFontWeightBold];
+            if (_subtext[b]) _subtext[b].hidden = YES;
+        }
+
+        [self placeControl:CTL_DPAD_UP rect:r_dup];
+        [self placeControl:CTL_DPAD_DOWN rect:r_ddn];
+        [self placeControl:CTL_DPAD_LEFT rect:r_dl];
+        [self placeControl:CTL_DPAD_RIGHT rect:r_dr];
+
+        _stickBase.hidden = YES;
+        _stickKnob.hidden = YES;
+
+    } else {
+        /* ══════════════════════════════════════════
+         * MODE 1: RACING LAYOUT
+         * Two-column racing controls, NOS, Pedals, Music/Map
+         * ══════════════════════════════════════════ */
+        /* Gas Pedal (bottom-right) */
+        CGFloat w_gas = 80, h_gas = 120;
+        CGRect r_gas = CGRectMake(safeR - w_gas, safeB - h_gas, w_gas, h_gas);
+
+        /* Brake Pedal (to the left of Gas) */
+        CGFloat w_brake = 76, h_brake = 105;
+        CGRect r_brake = CGRectMake(safeR - w_gas - 14 - w_brake, safeB - h_brake, w_brake, h_brake);
+
+        /* ⚡ NOS (X) - Prominent boost button directly above Gas */
+        CGFloat h_nos = 52;
+        CGRect r_nos = CGRectMake(safeR - w_gas, safeB - h_gas - 12 - h_nos, w_gas, h_nos);
+
+        /* E-BRAKE (A) - Handbrake button directly above Brake */
+        CGFloat h_a = 52;
+        CGRect r_a = CGRectMake(safeR - w_gas - 14 - w_brake, safeB - h_brake - 12 - h_a, w_brake, h_a);
+
+        /* LOOK BACK (B) - Directly above NOS */
+        CGFloat h_b = 44;
+        CGRect r_b = CGRectMake(safeR - w_gas, safeB - h_gas - 12 - h_nos - 10 - h_b, w_gas, h_b);
+
+        /* CAMERA (Y) - Directly above E-BRAKE */
+        CGFloat h_y = 44;
+        CGRect r_y = CGRectMake(safeR - w_gas - 14 - w_brake, safeB - h_brake - 12 - h_a - 10 - h_y, w_brake, h_y);
+
+        /* Shoulder buttons: 🎵 MUSIC (White/LB) & 🗺 MAP (Black/RB) at upper right */
+        CGFloat s_w = 78, s_h = 30;
+        CGRect r_white = CGRectMake(safeR - s_w * 2 - 10, safeT + 4, s_w, s_h);
+        CGRect r_black = CGRectMake(safeR - s_w, safeT + 4, s_w, s_h);
+
+        _text[CTL_A].string = @"E-BRAKE";
+        _text[CTL_B].string = @"LOOK";
+        _text[CTL_X].string = @"⚡ NOS";
+        _text[CTL_Y].string = @"CAM";
+        _text[CTL_X].fontSize = 17;
+        _text[CTL_A].fontSize = 13;
+        _text[CTL_B].fontSize = 13;
+        _text[CTL_Y].fontSize = 13;
+        _text[CTL_X].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:17 weight:UIFontWeightHeavy];
+        _text[CTL_A].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:13 weight:UIFontWeightHeavy];
+        _text[CTL_B].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:13 weight:UIFontWeightBold];
+        _text[CTL_Y].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:13 weight:UIFontWeightBold];
+        if (_subtext[CTL_A]) { _subtext[CTL_A].string = @"A"; _subtext[CTL_A].hidden = NO; }
+        if (_subtext[CTL_B]) { _subtext[CTL_B].string = @"B"; _subtext[CTL_B].hidden = NO; }
+        if (_subtext[CTL_X]) { _subtext[CTL_X].string = @"X"; _subtext[CTL_X].hidden = NO; }
+        if (_subtext[CTL_Y]) { _subtext[CTL_Y].string = @"Y"; _subtext[CTL_Y].hidden = NO; }
+
+        [self placeControl:CTL_GAS rect:r_gas];
+        [self placeControl:CTL_BRAKE rect:r_brake];
+        [self placeControl:CTL_A rect:r_a];
+        [self placeControl:CTL_B rect:r_b];
+        [self placeControl:CTL_X rect:r_nos];
+        [self placeControl:CTL_Y rect:r_y];
+        [self placeControl:CTL_WHITE rect:r_white];
+        [self placeControl:CTL_BLACK rect:r_black];
+
+        /* D-Pad at upper left */
+        CGFloat d = 42;
+        CGFloat dx = safeL + 64, dy = safeT + 80;
+        CGFloat d_dist = 36;
+        CGRect r_dup = CGRectMake(dx - d/2, dy - d_dist - d/2, d, d);
+        CGRect r_ddn = CGRectMake(dx - d/2, dy + d_dist - d/2, d, d);
+        CGRect r_dl  = CGRectMake(dx - d_dist - d/2, dy - d/2, d, d);
+        CGRect r_dr  = CGRectMake(dx + d_dist - d/2, dy - d/2, d, d);
+
+        for (int b = CTL_DPAD_UP; b <= CTL_DPAD_RIGHT; b++) {
+            _text[b].fontSize = 18;
+            _text[b].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:18 weight:UIFontWeightBold];
+            if (_subtext[b]) _subtext[b].hidden = YES;
+        }
+
+        [self placeControl:CTL_DPAD_UP rect:r_dup];
+        [self placeControl:CTL_DPAD_DOWN rect:r_ddn];
+        [self placeControl:CTL_DPAD_LEFT rect:r_dl];
+        [self placeControl:CTL_DPAD_RIGHT rect:r_dr];
+
+        /* Steering: Stick vs Arrows */
+        if (_steer_mode == 0) {
+            [self placeControl:CTL_STEER_LEFT rect:CGRectZero];
+            [self placeControl:CTL_STEER_RIGHT rect:CGRectZero];
+            _stickBase.hidden = NO;
+            _stickKnob.hidden = NO;
+            _stickRadius = 66;
+            _stickHome = CGPointMake(safeL + 76, safeB - 76);
+            if (!_stickTouch)
+                _stickCentre = _stickHome;
+            [self drawStick];
+        } else {
+            _stickBase.hidden = YES;
+            _stickKnob.hidden = YES;
+            CGFloat a_w = 84, a_h = 84;
+            CGRect r_steer_l = CGRectMake(safeL, safeB - a_h, a_w, a_h);
+            CGRect r_steer_r = CGRectMake(safeL + a_w + 14, safeB - a_h, a_w, a_h);
+            _text[CTL_STEER_LEFT].fontSize = 32;
+            _text[CTL_STEER_RIGHT].fontSize = 32;
+            _text[CTL_STEER_LEFT].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:32 weight:UIFontWeightHeavy];
+            _text[CTL_STEER_RIGHT].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:32 weight:UIFontWeightHeavy];
+            if (_subtext[CTL_STEER_LEFT]) _subtext[CTL_STEER_LEFT].hidden = YES;
+            if (_subtext[CTL_STEER_RIGHT]) _subtext[CTL_STEER_RIGHT].hidden = YES;
+            [self placeControl:CTL_STEER_LEFT rect:r_steer_l];
+            [self placeControl:CTL_STEER_RIGHT rect:r_steer_r];
+        }
+    }
+
+    [self updateTopBarLabels];
     [CATransaction commit];
 }
 
@@ -515,8 +717,11 @@ static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
     int best = -2;
     CGFloat bestDist = 1e9;
     for (int i = 0; i < NCTL; i++) {
+        if (CGRectIsEmpty(_frame[i]) || _shape[i].hidden)
+            continue;
         CGFloat pad = 14;
-        if (i == CTL_GAS || i == CTL_BRAKE) pad = 12;
+        if (i == CTL_GAS || i == CTL_BRAKE || i == CTL_X || i == CTL_A ||
+            i == CTL_STEER_LEFT || i == CTL_STEER_RIGHT) pad = 12;
         CGRect hitRect = CGRectInset(_frame[i], -pad, -pad);
         if (CGRectContainsPoint(hitRect, p)) {
             CGPoint center = CGPointMake(CGRectGetMidX(_frame[i]), CGRectGetMidY(_frame[i]));
@@ -531,10 +736,12 @@ static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
     if (best >= 0)
         return best;
 
-    /* Left steering zone: left 48% of screen, below the top bar */
-    UIEdgeInsets in = self.safeAreaInsets;
-    if (p.x < self.bounds.size.width * 0.48 && p.y > MAX(in.top, 8) + 38)
-        return CTL_STICK;
+    /* Left steering stick only when in Stick mode and stick is active */
+    if (_steer_mode == 0 && !_stickBase.hidden) {
+        UIEdgeInsets in = self.safeAreaInsets;
+        if (p.x < self.bounds.size.width * 0.48 && p.y > MAX(in.top, 8) + 38)
+            return CTL_STICK;
+    }
 
     return -2;
 }
@@ -550,7 +757,8 @@ static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
         return;
 
     if (!was) {
-        if (i == CTL_GAS || i == CTL_BRAKE || i == CTL_X)
+        if (i == CTL_GAS || i == CTL_BRAKE || i == CTL_X ||
+            i == CTL_STEER_LEFT || i == CTL_STEER_RIGHT)
             [_hapticHeavy impactOccurred];
         else if (i == CTL_A || i == CTL_B || i == CTL_Y ||
                  (i >= CTL_DPAD_UP && i <= CTL_DPAD_RIGHT))
@@ -560,13 +768,52 @@ static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
     }
 
     if (k_ctls[i].kind == CTL_SPECIAL) {
-        if (!was && k_ctls[i].target == 1001) {
-            int new_mode = ios_cycle_screen_mode();
-            [self updateScreenModeLabel];
-            const char *msg = "Screen: 16:9 Fit";
-            if (new_mode == 1) msg = "Screen: Fullscreen Fill";
-            else if (new_mode == 2) msg = "Screen: Zoom (No Bars)";
-            [self showToast:[NSString stringWithUTF8String:msg]];
+        if (k_ctls[i].target == 1001) {
+            /* Screen mode cycle */
+            if (!was) {
+                int new_mode = ios_cycle_screen_mode();
+                [self updateTopBarLabels];
+                const char *msg = "Screen: 16:9 Fit";
+                if (new_mode == 1) msg = "Screen: Fullscreen Fill";
+                else if (new_mode == 2) msg = "Screen: Zoom (No Bars)";
+                [self showToast:[NSString stringWithUTF8String:msg]];
+            }
+        } else if (k_ctls[i].target == 1004) {
+            /* Layout mode cycle (Menu <-> Race) */
+            if (!was) {
+                [self releaseAll];
+                _layout_mode = !_layout_mode;
+                ios_set_layout_mode(_layout_mode);
+                [self setNeedsLayout];
+                const char *msg = _layout_mode ? "Controls: Racing Layout" : "Controls: Menu Layout";
+                [self showToast:[NSString stringWithUTF8String:msg]];
+            }
+        } else if (k_ctls[i].target == 1005) {
+            /* Steering mode cycle (Stick <-> Arrows) */
+            if (!was) {
+                [self releaseAll];
+                _steer_mode = !_steer_mode;
+                ios_set_steer_mode(_steer_mode);
+                [self setNeedsLayout];
+                const char *msg = _steer_mode ? "Steering: Arrow Buttons (◀ / ▶)" : "Steering: Analog Stick";
+                [self showToast:[NSString stringWithUTF8String:msg]];
+            }
+        } else if (k_ctls[i].target == 1002) {
+            /* Steer Left Button */
+            if (_held[CTL_STEER_LEFT] > 0)
+                vpad_axis(SDL_CONTROLLER_AXIS_LEFTX, -1.0f);
+            else if (_held[CTL_STEER_RIGHT] > 0)
+                vpad_axis(SDL_CONTROLLER_AXIS_LEFTX, 1.0f);
+            else
+                vpad_axis(SDL_CONTROLLER_AXIS_LEFTX, 0.0f);
+        } else if (k_ctls[i].target == 1003) {
+            /* Steer Right Button */
+            if (_held[CTL_STEER_RIGHT] > 0)
+                vpad_axis(SDL_CONTROLLER_AXIS_LEFTX, 1.0f);
+            else if (_held[CTL_STEER_LEFT] > 0)
+                vpad_axis(SDL_CONTROLLER_AXIS_LEFTX, -1.0f);
+            else
+                vpad_axis(SDL_CONTROLLER_AXIS_LEFTX, 0.0f);
         }
     } else if (k_ctls[i].kind == CTL_TRIGGER) {
         vpad_axis(k_ctls[i].target, was ? 0.0f : 1.0f);
@@ -691,6 +938,8 @@ static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
     [_bound removeAllObjects];
     if (_stickTouch)
         [self endStick];
+    vpad_axis(SDL_CONTROLLER_AXIS_LEFTX, 0);
+    vpad_axis(SDL_CONTROLLER_AXIS_LEFTY, 0);
 }
 @end
 
