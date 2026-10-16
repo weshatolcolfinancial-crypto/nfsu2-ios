@@ -484,7 +484,7 @@ static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
     /* Place all controls */
     [self placeControl:CTL_A rect:r_a];
     [self placeControl:CTL_B rect:r_b];
-    [self placeControl:CTL_X rect:r_x];
+    [self placeControl:CTL_X rect:r_nos];
     [self placeControl:CTL_Y rect:r_y];
     [self placeControl:CTL_WHITE rect:r_white];
     [self placeControl:CTL_BLACK rect:r_black];
