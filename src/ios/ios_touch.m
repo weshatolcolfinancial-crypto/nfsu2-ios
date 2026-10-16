@@ -6,19 +6,21 @@
  * it through the ordinary SDL controller path (xinput_device.c), exactly as
  * it reads a DualSense, so nothing below the host knows about touch.
  *
- * Optimized for modern iPhones:
- *   - Dual Layout Modes:
- *       • MENU MODE (Normal Xbox Layout): Classic A/B/X/Y diamond on the right
- *         and standard D-pad on the left for clean, uncluttered menu navigation.
- *       • RACE MODE (Racing Two-Column Layout): Gas (RT) and Brake (LT) pedals,
- *         dedicated ⚡ NOS (X) boost button, E-BRAKE (A) drift button, Look Back (B),
- *         Camera (Y), and 🎵 Music / 🗺 Map auxiliary buttons.
- *   - Steering Modes:
- *       • ANALOG STICK: Floating, self-centering thumbstick on left side.
- *       • ARROW BUTTONS: Large dedicated ◀ and ▶ steering pads at bottom-left.
- *   - Modern Frosted-Glass Aesthetics with iconic Xbox colors and Taptic rumble.
- *   - Screen Mode Aspect Switcher (16:9 Fit, Fullscreen Stretch, Zoom).
- *   - Full safe-area awareness for Dynamic Island, notch, and home bar.
+ * Only one of the two is attached at a time: when a physical controller
+ * connects, the overlay hides and the virtual controller is detached, so the
+ * real one takes port 0; when the last one goes away, both come back.
+ *
+ * Menu layout: D-pad, confirm/back/start and auxiliary Xbox buttons.
+ * Drive layout: steering arrows, pedals, handbrake, nitrous, camera and pause.
+ * The verified PAL game state selects layouts automatically. The top-centre
+ * button allows a manual choice until the next game/menu transition.
+ * NFSU2_TOUCH_LAYOUT=drive starts with the driving layout.
+ *
+ * NFSU2_TOUCH=0 (Documents/nfsu2x_env.txt) turns the overlay off, =2 keeps
+ * it on even with a controller (the virtual one then takes the next port).
+ * The iOS Simulator always reports a controller of its own ("Gamepad").
+ * Main thread only, like everything UIKit; SDL's joystick calls take SDL's
+ * joystick lock, so the title's thread may read the controller meanwhile.
  */
 #import <UIKit/UIKit.h>
 #include <SDL.h>
@@ -26,195 +28,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
 
-#include "ios_scene.h"
-
-enum CtlKind { CTL_BUTTON, CTL_TRIGGER, CTL_SPECIAL };
-
-typedef struct {
-    enum CtlKind kind;
-    int          target;        /* SDL_GameControllerButton, _Axis, or special ID */
-    const char  *label;
-    const char  *sublabel;     /* subtitle badge, e.g. "RT", "LT" */
-    int          round;         /* 1: circle, 0: rounded rect / capsule */
-    uint32_t     colorHex;      /* primary accent color RGB */
-} CtlDef;
-
-enum {
-    CTL_A = 0,
-    CTL_B,
-    CTL_X,
-    CTL_Y,
-    CTL_WHITE,
-    CTL_BLACK,
-    CTL_BACK,
-    CTL_START,
-    CTL_DPAD_UP,
-    CTL_DPAD_DOWN,
-    CTL_DPAD_LEFT,
-    CTL_DPAD_RIGHT,
-    CTL_BRAKE,
-    CTL_GAS,
-    CTL_SCREEN_MODE,
-    CTL_LAYOUT_MODE,
-    CTL_STEER_MODE,
-    CTL_STEER_LEFT,
-    CTL_STEER_RIGHT,
-    NCTL
+#include "ios_touch_controls.h"
+#import "ios_touch_settings.h"
+#include "../apple/apple_game_state.h"
+#import "ios_music.h"
+extern void ios_controls_editor_pause(int on);
+static int physical_controllers(void);
+static const char *k_menu[TOUCH_COUNT] = {
+    "OK", "BACK", "X", "Y", "WHITE", "BLACK", "SELECT", "START",
+    "▲", "▼", "◀", "▶", "", "", "", ""
 };
-
-static const CtlDef k_ctls[NCTL] = {
-    [CTL_A]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_A,             "A",       "",    1, 0x2ECC71 }, /* Xbox Green */
-    [CTL_B]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_B,             "B",       "",    1, 0xE74C3C }, /* Xbox Red */
-    [CTL_X]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_X,             "X",       "",    1, 0x3498DB }, /* Xbox Blue */
-    [CTL_Y]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_Y,             "Y",       "",    1, 0xF1C40F }, /* Xbox Yellow */
-    [CTL_WHITE]       = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_LEFTSHOULDER,  "🎵 MUSIC","LB",  0, 0xEEEEEE }, /* EA Trax (White/LB) */
-    [CTL_BLACK]       = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, "🗺 MAP",  "RB",  0, 0x4A90E2 }, /* GPS Map (Black/RB) */
-    [CTL_BACK]        = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_BACK,          "BACK ⧏", "",    0, 0xBDC3C7 }, /* Menu / Map */
-    [CTL_START]       = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_START,         "START ⧐","",    0, 0xBDC3C7 }, /* Menu Pause */
-    [CTL_DPAD_UP]     = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_DPAD_UP,       "▲",       "",    0, 0x85C1E9 }, /* D-Pad */
-    [CTL_DPAD_DOWN]   = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_DPAD_DOWN,     "▼",       "",    0, 0x85C1E9 }, /* D-Pad */
-    [CTL_DPAD_LEFT]   = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_DPAD_LEFT,     "◀",       "",    0, 0x85C1E9 }, /* D-Pad */
-    [CTL_DPAD_RIGHT]  = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_DPAD_RIGHT,    "▶",       "",    0, 0x85C1E9 }, /* D-Pad */
-    [CTL_BRAKE]       = { CTL_TRIGGER, SDL_CONTROLLER_AXIS_TRIGGERLEFT,     "BRAKE",   "LT",  0, 0xFF3D00 }, /* Cherry Red */
-    [CTL_GAS]         = { CTL_TRIGGER, SDL_CONTROLLER_AXIS_TRIGGERRIGHT,    "GAS",     "RT",  0, 0x00E676 }, /* Electric Green */
-    [CTL_SCREEN_MODE] = { CTL_SPECIAL, 1001,                                "⛶ FULL",  "",    0, 0x00E5FF }, /* Aspect Mode */
-    [CTL_LAYOUT_MODE] = { CTL_SPECIAL, 1004,                                "🎮 MENU",  "",    0, 0xF39C12 }, /* Menu / Race Toggle */
-    [CTL_STEER_MODE]  = { CTL_SPECIAL, 1005,                                "🕹️ STICK", "",    0, 0x9B59B6 }, /* Stick / Arrows Toggle */
-    [CTL_STEER_LEFT]  = { CTL_SPECIAL, 1002,                                "◀",       "STEER",0, 0x00E5FF }, /* Steer Left Button */
-    [CTL_STEER_RIGHT] = { CTL_SPECIAL, 1003,                                "▶",       "STEER",0, 0x00E5FF }, /* Steer Right Button */
+static const char *k_drive[TOUCH_COUNT] = {
+    "E-BRAKE", "NOS", "SHIFT −", "SHIFT +", "CAMERA", "LOOK BACK", "SELECT", "Ⅱ",
+    "", "", "", "", "BRAKE", "GAS", "❮", "❯"
 };
+enum { NCTL = TOUCH_COUNT };
 
-enum { CTL_STICK = -1 };
-
-/* ── Settings Persistence (Screen Mode, Layout Mode, Steering Mode) ── */
-
-static int s_screen_mode = -1;
-static int s_layout_mode = -1;
-static int s_steer_mode = -1;
-
-static NSString *getDocumentsPath(void)
-{
-    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    return paths.firstObject;
-}
-
-int ios_get_screen_mode(void)
-{
-    if (s_screen_mode >= 0)
-        return s_screen_mode;
-
-    NSString *doc = getDocumentsPath();
-    if (doc) {
-        NSString *filePath = [doc stringByAppendingPathComponent:@"screen_mode.txt"];
-        NSError *err = nil;
-        NSString *content = [NSString stringWithContentsOfFile:filePath encoding:NSUTF8StringEncoding error:&err];
-        if (content && content.length > 0) {
-            int val = [content intValue];
-            if (val >= 0 && val <= 2) {
-                s_screen_mode = val;
-                return s_screen_mode;
-            }
-        }
-    }
-
-    const char *e = getenv("NFSU2_SCREEN_MODE");
-    if (!e) e = getenv("RECOMP_SCREEN_MODE");
-    if (e && *e >= '0' && *e <= '2') {
-        s_screen_mode = *e - '0';
-        return s_screen_mode;
-    }
-
-    s_screen_mode = 1; /* Default: Fullscreen Stretch */
-    return s_screen_mode;
-}
-
-void ios_set_screen_mode(int mode)
-{
-    if (mode < 0 || mode > 2)
-        mode = 0;
-    s_screen_mode = mode;
-    NSString *doc = getDocumentsPath();
-    if (doc) {
-        NSString *filePath = [doc stringByAppendingPathComponent:@"screen_mode.txt"];
-        NSString *content = [NSString stringWithFormat:@"%d\n", s_screen_mode];
-        [content writeToFile:filePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    }
-}
-
-int ios_cycle_screen_mode(void)
-{
-    int cur = ios_get_screen_mode();
-    int next = (cur + 1) % 3;
-    ios_set_screen_mode(next);
-    return next;
-}
-
-static int ios_get_layout_mode(void)
-{
-    if (s_layout_mode >= 0)
-        return s_layout_mode;
-    NSString *doc = getDocumentsPath();
-    if (doc) {
-        NSString *filePath = [doc stringByAppendingPathComponent:@"layout_mode.txt"];
-        NSString *content = [NSString stringWithContentsOfFile:filePath encoding:NSUTF8StringEncoding error:nil];
-        if (content && content.length > 0) {
-            int val = [content intValue];
-            if (val == 0 || val == 1) {
-                s_layout_mode = val;
-                return s_layout_mode;
-            }
-        }
-    }
-    s_layout_mode = 0; /* Default: Menu Layout on launch */
-    return s_layout_mode;
-}
-
-static void ios_set_layout_mode(int mode)
-{
-    s_layout_mode = mode ? 1 : 0;
-    NSString *doc = getDocumentsPath();
-    if (doc) {
-        NSString *filePath = [doc stringByAppendingPathComponent:@"layout_mode.txt"];
-        NSString *content = [NSString stringWithFormat:@"%d\n", s_layout_mode];
-        [content writeToFile:filePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    }
-}
-
-static int ios_get_steer_mode(void)
-{
-    if (s_steer_mode >= 0)
-        return s_steer_mode;
-    NSString *doc = getDocumentsPath();
-    if (doc) {
-        NSString *filePath = [doc stringByAppendingPathComponent:@"steer_mode.txt"];
-        NSString *content = [NSString stringWithContentsOfFile:filePath encoding:NSUTF8StringEncoding error:nil];
-        if (content && content.length > 0) {
-            int val = [content intValue];
-            if (val == 0 || val == 1) {
-                s_steer_mode = val;
-                return s_steer_mode;
-            }
-        }
-    }
-    s_steer_mode = 0; /* Default: Analog Stick */
-    return s_steer_mode;
-}
-
-static void ios_set_steer_mode(int mode)
-{
-    s_steer_mode = mode ? 1 : 0;
-    NSString *doc = getDocumentsPath();
-    if (doc) {
-        NSString *filePath = [doc stringByAppendingPathComponent:@"steer_mode.txt"];
-        NSString *content = [NSString stringWithFormat:@"%d\n", s_steer_mode];
-        [content writeToFile:filePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    }
-}
-
-/* ── Virtual Game Controller ──────────────────────────────────────── */
-
+/* The virtual controller: every button up to the D-pad and all six axes,
+ * so SDL's automatic mapping numbers them exactly as the enums do. */
 static SDL_Joystick *s_vpad;
 
 static void vpad_attach(void)
@@ -228,10 +60,15 @@ static void vpad_attach(void)
     d.version  = SDL_VIRTUAL_JOYSTICK_DESC_VERSION;
     d.type     = SDL_JOYSTICK_TYPE_GAMECONTROLLER;
     d.naxes    = SDL_CONTROLLER_AXIS_MAX;
-    d.nbuttons = SDL_CONTROLLER_BUTTON_DPAD_RIGHT + 1;
+    d.nbuttons = SDL_CONTROLLER_BUTTON_MAX;
     d.name     = "Touch Controls";
     index = SDL_JoystickAttachVirtualEx(&d);
     s_vpad = index >= 0 ? SDL_JoystickOpen(index) : NULL;
+    if (s_vpad) {
+        /* Zero is half a trigger press in SDL's signed axis range. */
+        SDL_JoystickSetVirtualAxis(s_vpad, SDL_CONTROLLER_AXIS_TRIGGERLEFT, SDL_JOYSTICK_AXIS_MIN);
+        SDL_JoystickSetVirtualAxis(s_vpad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, SDL_JOYSTICK_AXIS_MIN);
+    }
     if (!s_vpad)
         fprintf(stderr, "[ios] touch controller: %s\n", SDL_GetError());
 }
@@ -252,676 +89,382 @@ static void vpad_detach(void)
         }
 }
 
-static void vpad_axis(int axis, float v)        /* -1..1 (triggers 0..1) */
-{
-    Sint16 s;
-
-    if (!s_vpad)
-        return;
-    if (v > 1.0f) v = 1.0f;
-    if (v < -1.0f) v = -1.0f;
-    if (axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT || axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT)
-        s = (Sint16)(SDL_JOYSTICK_AXIS_MIN + v * (SDL_JOYSTICK_AXIS_MAX - SDL_JOYSTICK_AXIS_MIN));
-    else
-        s = (Sint16)(v * SDL_JOYSTICK_AXIS_MAX);
-    SDL_JoystickSetVirtualAxis(s_vpad, axis, s);
-}
-
-static void vpad_button(int button, int down)
-{
-    if (s_vpad)
-        SDL_JoystickSetVirtualButton(s_vpad, button, down ? SDL_PRESSED : SDL_RELEASED);
-}
-
-static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
-{
-    CGFloat r = ((hex >> 16) & 0xFF) / 255.0;
-    CGFloat g = ((hex >> 8) & 0xFF) / 255.0;
-    CGFloat b = (hex & 0xFF) / 255.0;
-    return [UIColor colorWithRed:r green:g blue:b alpha:alpha];
-}
-
-/* ── NFSTouchView Interface ───────────────────────────────────────── */
-
 @interface NFSTouchView : UIView
+@property(nonatomic) BOOL padVisible;
+- (instancetype)initWithFrame:(CGRect)frame defaults:(NSUserDefaults *)defaults;
 - (void)releaseAll;
-- (void)updateTopBarLabels;
-- (void)showToast:(NSString *)msg;
 @end
 
 @implementation NFSTouchView {
     CAShapeLayer *_shape[NCTL];
-    CATextLayer  *_text[NCTL];
-    CATextLayer  *_subtext[NCTL];
-    CGRect        _frame[NCTL];
-    int           _held[NCTL];
-    int           _layout_mode;     /* 0: MENU, 1: RACE */
-    int           _steer_mode;      /* 0: STICK, 1: ARROWS */
-    CAShapeLayer *_stickBase, *_stickKnob;
-    CGPoint       _stickHome, _stickCentre;
-    CGFloat       _stickRadius;
-    UITouch      *_stickTouch;
+    CATextLayer *_text[NCTL];
+    CGRect _frame[NCTL];
+    unsigned _held[NCTL];
+    BOOL _driving, _extras, _sentValid;
+    int _lastAutomatic;
+    NfsTouchInput _sent;
+    UIButton *_mode, *_more, *_settings;
+    NFSTouchLayouts *_layouts;
+    UINavigationController *_editor;
+    BOOL _padVisible, _previewing;
+    UIEdgeInsets _previewInsets;
     NSMapTable<UITouch *, NSNumber *> *_bound;
-    UIImpactFeedbackGenerator *_hapticLight;
-    UIImpactFeedbackGenerator *_hapticMedium;
-    UIImpactFeedbackGenerator *_hapticHeavy;
-    UILabel      *_toastLabel;
+    UIImpactFeedbackGenerator *_haptic;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame
 {
+    return [self initWithFrame:frame defaults:NSUserDefaults.standardUserDefaults];
+}
+
+- (instancetype)initWithFrame:(CGRect)frame defaults:(NSUserDefaults *)defaults
+{
     self = [super initWithFrame:frame];
-    if (!self)
-        return nil;
+    if (!self) return nil;
+    _layouts = [[NFSTouchLayouts alloc] initWithDefaults:defaults];
+    _padVisible = YES;
+    _lastAutomatic = -1;
     self.backgroundColor = UIColor.clearColor;
     self.multipleTouchEnabled = YES;
     self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     _bound = [NSMapTable weakToStrongObjectsMapTable];
-
-    _layout_mode = ios_get_layout_mode();
-    _steer_mode = ios_get_steer_mode();
-
-    _hapticLight = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-    _hapticMedium = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-    _hapticHeavy = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
-    [_hapticLight prepare];
-    [_hapticMedium prepare];
-    [_hapticHeavy prepare];
-
-    CGFloat scale = UIScreen.mainScreen.nativeScale;
-    if (scale < 1.0) scale = UIScreen.mainScreen.scale;
-
+    _haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     for (int i = 0; i < NCTL; i++) {
         _shape[i] = [CAShapeLayer layer];
-        _shape[i].strokeColor = colorFromHex(k_ctls[i].colorHex, 0.85).CGColor;
-        _shape[i].fillColor = colorFromHex(k_ctls[i].colorHex, 0.20).CGColor;
-        _shape[i].lineWidth = 2.0;
-        _shape[i].shadowColor = colorFromHex(k_ctls[i].colorHex, 1.0).CGColor;
-        _shape[i].shadowOffset = CGSizeZero;
-        _shape[i].shadowRadius = 8.0;
-        _shape[i].shadowOpacity = 0.0;
+        _shape[i].strokeColor = [UIColor colorWithWhite:1 alpha:.45].CGColor;
+        _shape[i].fillColor = [UIColor colorWithWhite:1 alpha:.10].CGColor;
+        _shape[i].lineWidth = 1.5;
         [self.layer addSublayer:_shape[i]];
-
         _text[i] = [CATextLayer layer];
-        _text[i].string = [NSString stringWithUTF8String:k_ctls[i].label];
+        _text[i].font = (__bridge CFTypeRef)[UIFont boldSystemFontOfSize:13];
+        _text[i].foregroundColor = [UIColor colorWithWhite:1 alpha:.85].CGColor;
         _text[i].alignmentMode = kCAAlignmentCenter;
-        _text[i].contentsScale = scale;
-        _text[i].foregroundColor = [UIColor colorWithWhite:1.0 alpha:0.95].CGColor;
-        CGFloat fsize = 14;
-        if (i == CTL_BACK || i == CTL_START || i == CTL_LAYOUT_MODE ||
-            i == CTL_STEER_MODE || i == CTL_SCREEN_MODE ||
-            i == CTL_WHITE || i == CTL_BLACK)
-            fsize = 12;
-        _text[i].fontSize = fsize;
-        _text[i].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:fsize weight:UIFontWeightBold];
+        _text[i].contentsScale = UIScreen.mainScreen.scale;
         [self.layer addSublayer:_text[i]];
-
-        if (k_ctls[i].sublabel && strlen(k_ctls[i].sublabel) > 0) {
-            _subtext[i] = [CATextLayer layer];
-            _subtext[i].string = [NSString stringWithUTF8String:k_ctls[i].sublabel];
-            _subtext[i].alignmentMode = kCAAlignmentCenter;
-            _subtext[i].contentsScale = scale;
-            _subtext[i].foregroundColor = [UIColor colorWithWhite:1.0 alpha:0.80].CGColor;
-            _subtext[i].fontSize = 11;
-            _subtext[i].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:11 weight:UIFontWeightBold];
-            [self.layer addSublayer:_subtext[i]];
-        }
     }
-
-    /* Stick base and knob */
-    _stickBase = [CAShapeLayer layer];
-    _stickBase.strokeColor = [UIColor colorWithWhite:1.0 alpha:0.60].CGColor;
-    _stickBase.fillColor = [UIColor colorWithWhite:1.0 alpha:0.10].CGColor;
-    _stickBase.lineWidth = 2.0;
-    _stickBase.shadowColor = [UIColor colorWithRed:0.0 green:0.8 blue:1.0 alpha:0.6].CGColor;
-    _stickBase.shadowOffset = CGSizeZero;
-    _stickBase.shadowRadius = 6.0;
-    _stickBase.shadowOpacity = 0.5;
-    [self.layer addSublayer:_stickBase];
-
-    _stickKnob = [CAShapeLayer layer];
-    _stickKnob.strokeColor = [UIColor colorWithWhite:1.0 alpha:0.90].CGColor;
-    _stickKnob.fillColor = [UIColor colorWithWhite:1.0 alpha:0.35].CGColor;
-    _stickKnob.lineWidth = 2.5;
-    _stickKnob.shadowColor = [UIColor colorWithWhite:1.0 alpha:0.8].CGColor;
-    _stickKnob.shadowOffset = CGSizeZero;
-    _stickKnob.shadowRadius = 8.0;
-    _stickKnob.shadowOpacity = 0.6;
-    [self.layer addSublayer:_stickKnob];
-
+    _mode = [UIButton buttonWithType:UIButtonTypeSystem];
+    _mode.backgroundColor = [UIColor colorWithWhite:0 alpha:.35];
+    _mode.layer.cornerRadius = 12;
+    [_mode setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    _mode.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+    [_mode addTarget:self action:@selector(toggleLayout) forControlEvents:UIControlEventTouchUpInside];
+    [self addSubview:_mode];
+    _more = [UIButton buttonWithType:UIButtonTypeSystem];
+    _more.backgroundColor = [UIColor colorWithWhite:0 alpha:.35];
+    _more.layer.cornerRadius = 12;
+    [_more setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    _more.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+    [_more addTarget:self action:@selector(toggleExtras) forControlEvents:UIControlEventTouchUpInside];
+    [self addSubview:_more];
+    _settings = [UIButton buttonWithType:UIButtonTypeSystem];
+    _settings.backgroundColor = [UIColor colorWithWhite:0 alpha:.35];
+    _settings.layer.cornerRadius = 12;
+    [_settings setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    _settings.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+    [_settings setTitle:@"EDIT" forState:UIControlStateNormal];
+    _settings.accessibilityLabel = @"Customize mobile controls";
+    [_settings addTarget:self action:@selector(openSettings) forControlEvents:UIControlEventTouchUpInside];
+    [self addSubview:_settings];
+    _driving = getenv("NFSU2_TOUCH_LAYOUT") && !strcmp(getenv("NFSU2_TOUCH_LAYOUT"), "drive");
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(releaseAll)
+        name:UIApplicationWillResignActiveNotification object:nil];
     return self;
 }
 
 - (void)placeControl:(int)i rect:(CGRect)r
 {
     _frame[i] = r;
-    if (CGRectIsEmpty(r)) {
-        _shape[i].hidden = YES;
-        _text[i].hidden = YES;
-        if (_subtext[i]) _subtext[i].hidden = YES;
-        return;
-    }
-    _shape[i].hidden = NO;
-    _text[i].hidden = NO;
+    _shape[i].hidden = _text[i].hidden = CGRectIsEmpty(r);
+    if (CGRectIsEmpty(r)) return;
+    int action = [[_layouts control:i driving:_driving][@"action"] intValue];
+    float opacity = [_layouts opacityForDriving:_driving];
+    _shape[i].opacity = _text[i].opacity = opacity;
+    BOOL circle = _driving && (i == TOUCH_A || i == TOUCH_B || i >= TOUCH_BRAKE);
+    _shape[i].path = (circle ? [UIBezierPath bezierPathWithOvalInRect:r]
+                           : [UIBezierPath bezierPathWithRoundedRect:r cornerRadius:14]).CGPath;
+    const char *label = action < TOUCH_COUNT ? (_driving ? k_drive : k_menu)[action] : "";
+    static const char *fallback[TOUCH_ACTION_COUNT] = { "A", "B", "X", "Y", "WHITE", "BLACK", "SELECT", "START",
+        "▲", "▼", "◀", "▶", "BRAKE", "GAS", "❮", "❯",
+        "L3", "R3", "L ↑", "L ↓", "R ←", "R →", "R ↑", "R ↓" };
+    _text[i].string = [NSString stringWithUTF8String:*label ? label : fallback[action]];
+    CGFloat font = (action == TOUCH_STEER_LEFT || action == TOUCH_STEER_RIGHT) ? 40 : 13;
+    _text[i].fontSize = font;
+    _text[i].frame = CGRectMake(r.origin.x, CGRectGetMidY(r) - (font + 4) / 2, r.size.width, font + 4);
+}
 
-    CGFloat corner = 14;
-    if (i == CTL_GAS || i == CTL_BRAKE) corner = 20;
-    else if (i == CTL_STEER_LEFT || i == CTL_STEER_RIGHT) corner = 18;
-    else if (_layout_mode == 0 && (i == CTL_A || i == CTL_B || i == CTL_X || i == CTL_Y))
-        corner = r.size.width / 2;
-    else if (i == CTL_X || i == CTL_A) corner = 16;
-    else if (i == CTL_B || i == CTL_Y) corner = 14;
+- (void)toggleExtras
+{
+    [self releaseAll];
+    _extras = !_extras;
+    [self setNeedsLayout];
+}
 
-    UIBezierPath *path = (corner >= r.size.width / 2 - 1)
-        ? [UIBezierPath bezierPathWithOvalInRect:r]
-        : [UIBezierPath bezierPathWithRoundedRect:r cornerRadius:corner];
-    _shape[i].path = path.CGPath;
+- (void)toggleLayout
+{
+    [self releaseAll];
+    _driving = !_driving;
+    [self setNeedsLayout];
+}
 
-    if (_subtext[i] && !_subtext[i].hidden) {
-        CGFloat th = 18, sh = 12;
-        CGFloat totalH = th + sh + 2;
-        CGFloat startY = CGRectGetMidY(r) - totalH / 2;
-        _text[i].frame = CGRectMake(r.origin.x, startY, r.size.width, th);
-        _subtext[i].frame = CGRectMake(r.origin.x, startY + th + 2, r.size.width, sh);
+/* Apply only actual mode transitions: a manual choice is retained until the
+ * next game/menu transition, and an open layout editor stays on its profile. */
+- (void)applyAutomaticMode:(int)mode
+{
+    if (mode < 0 || mode > 1 || _editor || _previewing || mode == _lastAutomatic) return;
+    _lastAutomatic = mode;
+    if (_driving == (mode != 0)) return;
+    [self releaseAll];
+    _driving = mode != 0;
+    _extras = NO;
+    [self setNeedsLayout];
+}
+
+- (CGRect)defaultFrameForControl:(int)i driving:(BOOL)driving extras:(BOOL)extras
+{
+    UIEdgeInsets in = self.safeAreaInsets;
+    CGFloat L = in.left + 12, R = self.bounds.size.width - in.right - 12;
+    CGFloat T = in.top + 8, B = self.bounds.size.height - MAX(in.bottom, 12) - 8;
+    CGFloat mid = self.bounds.size.width / 2;
+    CGFloat big = MIN(112, MIN((R - L) / 7, (B - T) / 2.6));
+    CGFloat d = MIN(54, (B - T - 72) / 3), small = 44;
+    CGRect r = CGRectZero;
+    if (driving) {
+        switch (i) {
+        case TOUCH_STEER_LEFT:  r = CGRectMake(L, B - big, big, big); break;
+        case TOUCH_STEER_RIGHT: r = CGRectMake(L + big + 16, B - big, big, big); break;
+        case TOUCH_GAS:   r = CGRectMake(R - big, B - big, big, big); break;
+        case TOUCH_BRAKE: r = CGRectMake(R - 2 * big - 16, B - big * .75, big * .75, big * .75); break;
+        case TOUCH_A: r = CGRectMake(R - 2 * big - 16, B - big * 1.6 - 12, big * .75, big * .75); break;
+        case TOUCH_B: r = CGRectMake(R - big, B - 2 * big - 16, big * .85, big * .85); break;
+        case TOUCH_START: r = CGRectMake(R - small, T, small, small); break;
+        case TOUCH_WHITE: r = CGRectMake(R - 150, T, 98, small); break;
+        case TOUCH_BLACK: r = CGRectMake(L, T + small + 8, 98, small); break;
+        case TOUCH_BACK: r = CGRectMake(L, T, 72, small); break;
+        case TOUCH_X: r = CGRectMake(L, B - big - small - 16, 84, small); break;
+        case TOUCH_Y: r = CGRectMake(L + 92, B - big - small - 16, 84, small); break;
+        }
     } else {
-        CGFloat lh = r.size.height * 0.55;
-        if (lh > 36) lh = 36;
-        _text[i].frame = CGRectMake(r.origin.x, CGRectGetMidY(r) - lh / 2, r.size.width, lh);
+        CGFloat dx = L + 1.5 * d, dy = B - 1.5 * d;
+        switch (i) {
+        case TOUCH_UP:    r = CGRectMake(dx - d / 2, dy - 1.5 * d, d, d); break;
+        case TOUCH_DOWN:  r = CGRectMake(dx - d / 2, dy + .5 * d, d, d); break;
+        case TOUCH_LEFT:  r = CGRectMake(dx - 1.5 * d, dy - d / 2, d, d); break;
+        case TOUCH_RIGHT: r = CGRectMake(dx + .5 * d, dy - d / 2, d, d); break;
+        case TOUCH_A: r = CGRectMake(R - 88, B - 88, 88, 88); break;
+        case TOUCH_B: r = CGRectMake(R - 168, B - 64, 64, 64); break;
+        case TOUCH_START: r = CGRectMake(R - 80, T, 80, small); break;
+        case TOUCH_X: case TOUCH_Y: case TOUCH_WHITE: case TOUCH_BLACK:
+            if (extras) r = CGRectMake(mid - 138 + (i - TOUCH_X) * 70, T + small + 16, 64, small); break;
+        }
     }
+    return r;
 }
 
-- (void)drawStick
+- (CGRect)usableArea
 {
-    CGFloat r = _stickRadius, k = r * 0.42;
+    UIEdgeInsets in = self.safeAreaInsets;
+    CGRect r = UIEdgeInsetsInsetRect(self.bounds, UIEdgeInsetsMake(in.top + 8, in.left + 12,
+        MAX(in.bottom, 12) + 8, in.right + 12));
+    return r;
+}
 
-    /* Base with cardinal tick marks (crosshair) */
-    UIBezierPath *basePath = [UIBezierPath bezierPathWithOvalInRect:
-                              CGRectMake(_stickCentre.x - r, _stickCentre.y - r, 2 * r, 2 * r)];
-    CGFloat tickLen = 8;
-    [basePath moveToPoint:CGPointMake(_stickCentre.x, _stickCentre.y - r)];
-    [basePath addLineToPoint:CGPointMake(_stickCentre.x, _stickCentre.y - r + tickLen)];
-    [basePath moveToPoint:CGPointMake(_stickCentre.x, _stickCentre.y + r)];
-    [basePath addLineToPoint:CGPointMake(_stickCentre.x, _stickCentre.y + r - tickLen)];
-    [basePath moveToPoint:CGPointMake(_stickCentre.x - r, _stickCentre.y)];
-    [basePath addLineToPoint:CGPointMake(_stickCentre.x - r + tickLen, _stickCentre.y)];
-    [basePath moveToPoint:CGPointMake(_stickCentre.x + r, _stickCentre.y)];
-    [basePath addLineToPoint:CGPointMake(_stickCentre.x + r - tickLen, _stickCentre.y)];
-    _stickBase.path = basePath.CGPath;
-
-    if (!_stickTouch) {
-        _stickKnob.path = [UIBezierPath bezierPathWithOvalInRect:
-                           CGRectMake(_stickCentre.x - k, _stickCentre.y - k, 2 * k, 2 * k)].CGPath;
+- (CGRect)configuredFrame:(int)i
+{
+    NSDictionary *c = [_layouts control:i driving:_driving];
+    int visible = [c[@"visible"] intValue];
+    CGRect r = [self defaultFrameForControl:i driving:_driving extras:_extras];
+    if (!_padVisible || visible == 0) return CGRectZero;
+    if (CGRectIsEmpty(r) && visible != 1) return CGRectZero;
+    if (CGRectIsEmpty(r)) {
+        r = [self defaultFrameForControl:i driving:_driving extras:YES];
+        if (CGRectIsEmpty(r)) r = [self defaultFrameForControl:i driving:!_driving extras:YES];
+        if (CGRectIsEmpty(r)) r = CGRectMake(100, 100, 64, 64);
     }
-}
-
-- (void)updateTopBarLabels
-{
-    int sm = ios_get_screen_mode();
-    NSString *txt_s = @"⛶ FULL";
-    if (sm == 0) txt_s = @"⛶ 16:9";
-    else if (sm == 2) txt_s = @"⛶ ZOOM";
-    _text[CTL_SCREEN_MODE].string = txt_s;
-
-    _text[CTL_LAYOUT_MODE].string = _layout_mode ? @"🏎️ RACE" : @"🎮 MENU";
-    _text[CTL_STEER_MODE].string  = _steer_mode ? @"◀▶ KEYS" : @"🕹️ STICK";
-}
-
-- (void)showToast:(NSString *)message
-{
-    if (!_toastLabel) {
-        _toastLabel = [[UILabel alloc] init];
-        _toastLabel.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.85];
-        _toastLabel.textColor = UIColor.whiteColor;
-        _toastLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
-        _toastLabel.textAlignment = NSTextAlignmentCenter;
-        _toastLabel.layer.cornerRadius = 14;
-        _toastLabel.layer.masksToBounds = YES;
-        _toastLabel.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.3].CGColor;
-        _toastLabel.layer.borderWidth = 1.0;
-        [self addSubview:_toastLabel];
+    CGRect area = self.usableArea;
+    CGFloat scale = [c[@"scale"] doubleValue];
+    CGSize size = CGSizeMake(MIN(area.size.width, MAX(44, r.size.width * scale)),
+                             MIN(area.size.height, MAX(44, r.size.height * scale)));
+    CGPoint centre = CGPointMake(CGRectGetMidX(r), CGRectGetMidY(r));
+    if ([c[@"custom"] boolValue]) {
+        centre.x = area.origin.x + [c[@"x"] doubleValue] * area.size.width;
+        centre.y = area.origin.y + [c[@"y"] doubleValue] * area.size.height;
     }
-    _toastLabel.text = message;
-    [_toastLabel sizeToFit];
-    CGFloat w = _toastLabel.bounds.size.width + 28;
-    CGFloat h = 32;
-    CGFloat top = self.safeAreaInsets.top + 46;
-    _toastLabel.frame = CGRectMake((self.bounds.size.width - w) / 2, top, w, h);
-    _toastLabel.alpha = 1.0;
-    _toastLabel.hidden = NO;
-
-    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideToast) object:nil];
-    [self performSelector:@selector(hideToast) withObject:nil afterDelay:1.4];
+    CGFloat x = MAX(area.origin.x, MIN(CGRectGetMaxX(area) - size.width, centre.x - size.width / 2));
+    CGFloat y = MAX(area.origin.y, MIN(CGRectGetMaxY(area) - size.height, centre.y - size.height / 2));
+    return CGRectMake(x, y, size.width, size.height);
 }
 
-- (void)hideToast
+- (UIEdgeInsets)safeAreaInsets
 {
-    [UIView animateWithDuration:0.3 animations:^{
-        self->_toastLabel.alpha = 0.0;
-    } completion:^(BOOL finished) {
-        if (finished)
-            self->_toastLabel.hidden = YES;
-    }];
+    return _previewing ? _previewInsets : [super safeAreaInsets];
 }
 
-/* Laid out dynamically inside safe area insets for modern landscape iPhones. */
+- (UIView *)previewWithLayouts:(NFSTouchLayouts *)layouts driving:(BOOL)driving
+{
+    NFSTouchView *v = [[NFSTouchView alloc] initWithFrame:self.bounds defaults:nil];
+    v->_layouts = layouts;
+    v->_driving = driving;
+    v->_extras = YES;
+    v->_previewing = YES;
+    v->_previewInsets = self.safeAreaInsets;
+    v.autoresizingMask = UIViewAutoresizingNone;
+    v.userInteractionEnabled = NO;
+    return v;
+}
+
+- (BOOL)padVisible { return _padVisible; }
+- (void)setPadVisible:(BOOL)visible
+{
+    [self releaseAll];
+    _padVisible = visible;
+    [self setNeedsLayout];
+}
+
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event
+{
+    if (!_padVisible) return CGRectContainsPoint(_settings.frame, point);
+    return [super pointInside:point withEvent:event];
+}
+
+- (void)openSettings
+{
+    if (_editor) return;
+    UIViewController *presenter = nil;
+    for (UIResponder *r = self.nextResponder; r; r = r.nextResponder)
+        if ([r isKindOfClass:UIViewController.class]) { presenter = (UIViewController *)r; break; }
+    if (!presenter || presenter.presentedViewController) return;
+    [self releaseAll];
+    ios_controls_editor_pause(1);
+    NFSTouchSettingsController *settings = [[NFSTouchSettingsController alloc] initWithLayouts:_layouts
+        driving:_driving controllerConnected:physical_controllers() != 0];
+    __weak typeof(self) weakSelf = self;
+    settings.defaultPosition = ^CGPoint(int control, BOOL driving) {
+        NFSTouchView *v = weakSelf;
+        if (!v) return CGPointMake(.5, .5);
+        CGRect r = [v defaultFrameForControl:control driving:driving extras:YES];
+        if (CGRectIsEmpty(r)) r = [v defaultFrameForControl:control driving:!driving extras:YES];
+        CGRect area = v.usableArea;
+        return CGPointMake((CGRectGetMidX(r) - area.origin.x) / MAX(1, area.size.width),
+                           (CGRectGetMidY(r) - area.origin.y) / MAX(1, area.size.height));
+    };
+    settings.preview = ^UIView *(NFSTouchLayouts *draft, BOOL driving) {
+        return [weakSelf previewWithLayouts:draft driving:driving];
+    };
+    __weak NFSTouchSettingsController *weakSettings = settings;
+    settings.finished = ^(BOOL saved) { [weakSelf finishSettings:weakSettings saved:saved]; };
+    _editor = [[UINavigationController alloc] initWithRootViewController:settings];
+    _editor.modalPresentationStyle = UIModalPresentationFullScreen;
+    _editor.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    [presenter presentViewController:_editor animated:YES completion:nil];
+}
+
+- (void)finishSettings:(NFSTouchSettingsController *)settings saved:(BOOL)saved
+{
+    settings.finished = nil;
+    if (saved) { _layouts = settings.draft; [_layouts save]; }
+    [self releaseAll];
+    [self setNeedsLayout];
+    UINavigationController *editor = _editor;
+    _editor = nil;
+    [editor dismissViewControllerAnimated:YES completion:nil];
+    ios_controls_editor_pause(0);
+}
+
+/* The picture fills the display; only controls respect the notch/home indicator. */
 - (void)layoutSubviews
 {
     [super layoutSubviews];
-
+    [self releaseAll];
     UIEdgeInsets in = self.safeAreaInsets;
-    CGFloat safeL = MAX(in.left, 16);
-    CGFloat safeR = self.bounds.size.width - MAX(in.right, 16);
-    CGFloat safeT = MAX(in.top, 8);
-    CGFloat safeB = self.bounds.size.height - MAX(in.bottom, 12);
-    CGFloat midX = self.bounds.size.width / 2;
-
+    CGFloat L = in.left + 12;
+    CGFloat T = in.top + 8;
+    CGFloat mid = self.bounds.size.width / 2;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-
-    /* ── Top Bar Controls (5 capsules centered) ── */
-    CGFloat top_h = 30;
-    CGRect r_back   = CGRectMake(midX - 200, safeT + 4, 68, top_h);
-    CGRect r_start  = CGRectMake(midX - 126, safeT + 4, 68, top_h);
-    CGRect r_layout = CGRectMake(midX - 52, safeT + 4, 82, top_h);
-    CGRect r_steer  = CGRectMake(midX + 36, safeT + 4, 84, top_h);
-    CGRect r_screen = CGRectMake(midX + 126, safeT + 4, 76, top_h);
-
-    [self placeControl:CTL_BACK rect:r_back];
-    [self placeControl:CTL_START rect:r_start];
-    [self placeControl:CTL_LAYOUT_MODE rect:r_layout];
-    [self placeControl:CTL_STEER_MODE rect:r_steer];
-    [self placeControl:CTL_SCREEN_MODE rect:r_screen];
-
-    if (_layout_mode == 0) {
-        /* ══════════════════════════════════════════
-         * MODE 0: NORMAL MENU LAYOUT
-         * Clean classic Xbox diamond, D-pad, no pedals
-         * ══════════════════════════════════════════ */
-        [self placeControl:CTL_GAS rect:CGRectZero];
-        [self placeControl:CTL_BRAKE rect:CGRectZero];
-        [self placeControl:CTL_WHITE rect:CGRectZero];
-        [self placeControl:CTL_BLACK rect:CGRectZero];
-        [self placeControl:CTL_STEER_LEFT rect:CGRectZero];
-        [self placeControl:CTL_STEER_RIGHT rect:CGRectZero];
-
-        /* Classic Xbox Diamond on the right */
-        CGFloat f = 56; /* diameter */
-        CGFloat fx = safeR - 110;
-        CGFloat fy = safeB - 110;
-        CGFloat f_dist = 48;
-
-        CGRect r_y = CGRectMake(fx - f/2, fy - f_dist - f/2, f, f);
-        CGRect r_a = CGRectMake(fx - f/2, fy + f_dist - f/2, f, f);
-        CGRect r_x = CGRectMake(fx - f_dist - f/2, fy - f/2, f, f);
-        CGRect r_b = CGRectMake(fx + f_dist - f/2, fy - f/2, f, f);
-
-        _text[CTL_A].string = @"A";
-        _text[CTL_B].string = @"B";
-        _text[CTL_X].string = @"X";
-        _text[CTL_Y].string = @"Y";
-        _text[CTL_A].fontSize = 22;
-        _text[CTL_B].fontSize = 22;
-        _text[CTL_X].fontSize = 22;
-        _text[CTL_Y].fontSize = 22;
-        _text[CTL_A].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:22 weight:UIFontWeightBold];
-        _text[CTL_B].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:22 weight:UIFontWeightBold];
-        _text[CTL_X].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:22 weight:UIFontWeightBold];
-        _text[CTL_Y].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:22 weight:UIFontWeightBold];
-        if (_subtext[CTL_A]) _subtext[CTL_A].hidden = YES;
-        if (_subtext[CTL_B]) _subtext[CTL_B].hidden = YES;
-        if (_subtext[CTL_X]) _subtext[CTL_X].hidden = YES;
-        if (_subtext[CTL_Y]) _subtext[CTL_Y].hidden = YES;
-
-        [self placeControl:CTL_A rect:r_a];
-        [self placeControl:CTL_B rect:r_b];
-        [self placeControl:CTL_X rect:r_x];
-        [self placeControl:CTL_Y rect:r_y];
-
-        /* D-Pad on the left for menu navigation */
-        CGFloat d = 48;
-        CGFloat dx = safeL + 80, dy = safeB - 110;
-        CGFloat d_dist = 42;
-        CGRect r_dup = CGRectMake(dx - d/2, dy - d_dist - d/2, d, d);
-        CGRect r_ddn = CGRectMake(dx - d/2, dy + d_dist - d/2, d, d);
-        CGRect r_dl  = CGRectMake(dx - d_dist - d/2, dy - d/2, d, d);
-        CGRect r_dr  = CGRectMake(dx + d_dist - d/2, dy - d/2, d, d);
-
-        for (int b = CTL_DPAD_UP; b <= CTL_DPAD_RIGHT; b++) {
-            _text[b].fontSize = 22;
-            _text[b].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:22 weight:UIFontWeightBold];
-            if (_subtext[b]) _subtext[b].hidden = YES;
-        }
-
-        [self placeControl:CTL_DPAD_UP rect:r_dup];
-        [self placeControl:CTL_DPAD_DOWN rect:r_ddn];
-        [self placeControl:CTL_DPAD_LEFT rect:r_dl];
-        [self placeControl:CTL_DPAD_RIGHT rect:r_dr];
-
-        _stickBase.hidden = YES;
-        _stickKnob.hidden = YES;
-
-    } else {
-        /* ══════════════════════════════════════════
-         * MODE 1: RACING LAYOUT
-         * Two-column racing controls, NOS, Pedals, Music/Map
-         * ══════════════════════════════════════════ */
-        /* Gas Pedal (bottom-right) */
-        CGFloat w_gas = 80, h_gas = 120;
-        CGRect r_gas = CGRectMake(safeR - w_gas, safeB - h_gas, w_gas, h_gas);
-
-        /* Brake Pedal (to the left of Gas) */
-        CGFloat w_brake = 76, h_brake = 105;
-        CGRect r_brake = CGRectMake(safeR - w_gas - 14 - w_brake, safeB - h_brake, w_brake, h_brake);
-
-        /* ⚡ NOS (X) - Prominent boost button directly above Gas */
-        CGFloat h_nos = 52;
-        CGRect r_nos = CGRectMake(safeR - w_gas, safeB - h_gas - 12 - h_nos, w_gas, h_nos);
-
-        /* E-BRAKE (A) - Handbrake button directly above Brake */
-        CGFloat h_a = 52;
-        CGRect r_a = CGRectMake(safeR - w_gas - 14 - w_brake, safeB - h_brake - 12 - h_a, w_brake, h_a);
-
-        /* LOOK BACK (B) - Directly above NOS */
-        CGFloat h_b = 44;
-        CGRect r_b = CGRectMake(safeR - w_gas, safeB - h_gas - 12 - h_nos - 10 - h_b, w_gas, h_b);
-
-        /* CAMERA (Y) - Directly above E-BRAKE */
-        CGFloat h_y = 44;
-        CGRect r_y = CGRectMake(safeR - w_gas - 14 - w_brake, safeB - h_brake - 12 - h_a - 10 - h_y, w_brake, h_y);
-
-        /* Shoulder buttons: 🎵 MUSIC (White/LB) & 🗺 MAP (Black/RB) at upper right */
-        CGFloat s_w = 78, s_h = 30;
-        CGRect r_white = CGRectMake(safeR - s_w * 2 - 10, safeT + 4, s_w, s_h);
-        CGRect r_black = CGRectMake(safeR - s_w, safeT + 4, s_w, s_h);
-
-        _text[CTL_A].string = @"E-BRAKE";
-        _text[CTL_B].string = @"LOOK";
-        _text[CTL_X].string = @"⚡ NOS";
-        _text[CTL_Y].string = @"CAM";
-        _text[CTL_X].fontSize = 17;
-        _text[CTL_A].fontSize = 13;
-        _text[CTL_B].fontSize = 13;
-        _text[CTL_Y].fontSize = 13;
-        _text[CTL_X].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:17 weight:UIFontWeightHeavy];
-        _text[CTL_A].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:13 weight:UIFontWeightHeavy];
-        _text[CTL_B].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:13 weight:UIFontWeightBold];
-        _text[CTL_Y].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:13 weight:UIFontWeightBold];
-        if (_subtext[CTL_A]) { _subtext[CTL_A].string = @"A"; _subtext[CTL_A].hidden = NO; }
-        if (_subtext[CTL_B]) { _subtext[CTL_B].string = @"B"; _subtext[CTL_B].hidden = NO; }
-        if (_subtext[CTL_X]) { _subtext[CTL_X].string = @"X"; _subtext[CTL_X].hidden = NO; }
-        if (_subtext[CTL_Y]) { _subtext[CTL_Y].string = @"Y"; _subtext[CTL_Y].hidden = NO; }
-
-        [self placeControl:CTL_GAS rect:r_gas];
-        [self placeControl:CTL_BRAKE rect:r_brake];
-        [self placeControl:CTL_A rect:r_a];
-        [self placeControl:CTL_B rect:r_b];
-        [self placeControl:CTL_X rect:r_nos];
-        [self placeControl:CTL_Y rect:r_y];
-        [self placeControl:CTL_WHITE rect:r_white];
-        [self placeControl:CTL_BLACK rect:r_black];
-
-        /* D-Pad at upper left */
-        CGFloat d = 42;
-        CGFloat dx = safeL + 64, dy = safeT + 80;
-        CGFloat d_dist = 36;
-        CGRect r_dup = CGRectMake(dx - d/2, dy - d_dist - d/2, d, d);
-        CGRect r_ddn = CGRectMake(dx - d/2, dy + d_dist - d/2, d, d);
-        CGRect r_dl  = CGRectMake(dx - d_dist - d/2, dy - d/2, d, d);
-        CGRect r_dr  = CGRectMake(dx + d_dist - d/2, dy - d/2, d, d);
-
-        for (int b = CTL_DPAD_UP; b <= CTL_DPAD_RIGHT; b++) {
-            _text[b].fontSize = 18;
-            _text[b].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:18 weight:UIFontWeightBold];
-            if (_subtext[b]) _subtext[b].hidden = YES;
-        }
-
-        [self placeControl:CTL_DPAD_UP rect:r_dup];
-        [self placeControl:CTL_DPAD_DOWN rect:r_ddn];
-        [self placeControl:CTL_DPAD_LEFT rect:r_dl];
-        [self placeControl:CTL_DPAD_RIGHT rect:r_dr];
-
-        /* Steering: Stick vs Arrows */
-        if (_steer_mode == 0) {
-            [self placeControl:CTL_STEER_LEFT rect:CGRectZero];
-            [self placeControl:CTL_STEER_RIGHT rect:CGRectZero];
-            _stickBase.hidden = NO;
-            _stickKnob.hidden = NO;
-            _stickRadius = 66;
-            _stickHome = CGPointMake(safeL + 76, safeB - 76);
-            if (!_stickTouch)
-                _stickCentre = _stickHome;
-            [self drawStick];
-        } else {
-            _stickBase.hidden = YES;
-            _stickKnob.hidden = YES;
-            CGFloat a_w = 84, a_h = 84;
-            CGRect r_steer_l = CGRectMake(safeL, safeB - a_h, a_w, a_h);
-            CGRect r_steer_r = CGRectMake(safeL + a_w + 14, safeB - a_h, a_w, a_h);
-            _text[CTL_STEER_LEFT].fontSize = 32;
-            _text[CTL_STEER_RIGHT].fontSize = 32;
-            _text[CTL_STEER_LEFT].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:32 weight:UIFontWeightHeavy];
-            _text[CTL_STEER_RIGHT].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:32 weight:UIFontWeightHeavy];
-            if (_subtext[CTL_STEER_LEFT]) _subtext[CTL_STEER_LEFT].hidden = YES;
-            if (_subtext[CTL_STEER_RIGHT]) _subtext[CTL_STEER_RIGHT].hidden = YES;
-            [self placeControl:CTL_STEER_LEFT rect:r_steer_l];
-            [self placeControl:CTL_STEER_RIGHT rect:r_steer_r];
-        }
+    _mode.frame = CGRectMake(mid - 64, T, 128, 44);
+    _settings.frame = CGRectMake(mid - 148, T, 76, 44);
+    _mode.hidden = !_padVisible;
+    _more.hidden = _driving || !_padVisible;
+    _more.frame = CGRectMake(L, T, 72, 44);
+    [_more setTitle:_extras ? @"LESS" : @"MORE" forState:UIControlStateNormal];
+    [_mode setTitle:_driving ? @"MENU CONTROLS" : @"DRIVE CONTROLS" forState:UIControlStateNormal];
+    for (int i = 0; i < NCTL; i++) {
+        [self placeControl:i rect:[self configuredFrame:i]];
     }
-
-    [self updateTopBarLabels];
     [CATransaction commit];
 }
 
 - (int)controlAt:(CGPoint)p
 {
-    int best = -2;
-    CGFloat bestDist = 1e9;
-    for (int i = 0; i < NCTL; i++) {
-        if (CGRectIsEmpty(_frame[i]) || _shape[i].hidden)
-            continue;
-        CGFloat pad = 14;
-        if (i == CTL_GAS || i == CTL_BRAKE || i == CTL_X || i == CTL_A ||
-            i == CTL_STEER_LEFT || i == CTL_STEER_RIGHT) pad = 12;
-        CGRect hitRect = CGRectInset(_frame[i], -pad, -pad);
-        if (CGRectContainsPoint(hitRect, p)) {
-            CGPoint center = CGPointMake(CGRectGetMidX(_frame[i]), CGRectGetMidY(_frame[i]));
-            CGFloat dx = p.x - center.x, dy = p.y - center.y;
-            CGFloat dist = dx * dx + dy * dy;
-            if (dist < bestDist) {
-                bestDist = dist;
-                best = i;
-            }
-        }
-    }
-    if (best >= 0)
-        return best;
+    if (!_padVisible || _editor) return -1;
+    for (int i = 0; i < NCTL; i++)
+        if (!_shape[i].hidden && CGRectContainsPoint(_frame[i], p)) return i;
+    return -1;
+}
 
-    /* Left steering stick only when in Stick mode and stick is active */
-    if (_steer_mode == 0 && !_stickBase.hidden) {
-        UIEdgeInsets in = self.safeAreaInsets;
-        if (p.x < self.bounds.size.width * 0.48 && p.y > MAX(in.top, 8) + 38)
-            return CTL_STICK;
-    }
-
-    return -2;
+/* Opposite arrows cancel. Send changed axes/buttons only. */
+- (void)sendInput
+{
+    if (_previewing) return;
+    NfsTouchInput input;
+    int actions[NCTL];
+    for (int i = 0; i < NCTL; i++) actions[i] = [[_layouts control:i driving:_driving][@"action"] intValue];
+    nfs_touch_mapped_input(_held, actions, &input);
+    if (s_vpad) {
+        for (int i = 0; i < SDL_CONTROLLER_BUTTON_MAX; i++)
+            if (!_sentValid || input.buttons[i] != _sent.buttons[i])
+                SDL_JoystickSetVirtualButton(s_vpad, i, input.buttons[i]);
+        for (int i = 0; i < SDL_CONTROLLER_AXIS_MAX; i++)
+            if (!_sentValid || input.axes[i] != _sent.axes[i])
+                SDL_JoystickSetVirtualAxis(s_vpad, i, input.axes[i]);
+        _sent = input;
+        _sentValid = YES;
+    } else _sentValid = NO;
 }
 
 - (void)setHeld:(int)i delta:(int)delta
 {
-    int was = _held[i] > 0;
-
-    _held[i] += delta;
-    if (_held[i] < 0)
-        _held[i] = 0;
-    if ((_held[i] > 0) == was)
-        return;
-
-    if (!was) {
-        if (i == CTL_GAS || i == CTL_BRAKE || i == CTL_X ||
-            i == CTL_STEER_LEFT || i == CTL_STEER_RIGHT)
-            [_hapticHeavy impactOccurred];
-        else if (i == CTL_A || i == CTL_B || i == CTL_Y ||
-                 (i >= CTL_DPAD_UP && i <= CTL_DPAD_RIGHT))
-            [_hapticMedium impactOccurred];
-        else
-            [_hapticLight impactOccurred];
-    }
-
-    if (k_ctls[i].kind == CTL_SPECIAL) {
-        if (k_ctls[i].target == 1001) {
-            /* Screen mode cycle */
-            if (!was) {
-                int new_mode = ios_cycle_screen_mode();
-                [self updateTopBarLabels];
-                const char *msg = "Screen: 16:9 Fit";
-                if (new_mode == 1) msg = "Screen: Fullscreen Fill";
-                else if (new_mode == 2) msg = "Screen: Zoom (No Bars)";
-                [self showToast:[NSString stringWithUTF8String:msg]];
-            }
-        } else if (k_ctls[i].target == 1004) {
-            /* Layout mode cycle (Menu <-> Race) */
-            if (!was) {
-                [self releaseAll];
-                _layout_mode = !_layout_mode;
-                ios_set_layout_mode(_layout_mode);
-                [self setNeedsLayout];
-                const char *msg = _layout_mode ? "Controls: Racing Layout" : "Controls: Menu Layout";
-                [self showToast:[NSString stringWithUTF8String:msg]];
-            }
-        } else if (k_ctls[i].target == 1005) {
-            /* Steering mode cycle (Stick <-> Arrows) */
-            if (!was) {
-                [self releaseAll];
-                _steer_mode = !_steer_mode;
-                ios_set_steer_mode(_steer_mode);
-                [self setNeedsLayout];
-                const char *msg = _steer_mode ? "Steering: Arrow Buttons (◀ / ▶)" : "Steering: Analog Stick";
-                [self showToast:[NSString stringWithUTF8String:msg]];
-            }
-        } else if (k_ctls[i].target == 1002) {
-            /* Steer Left Button */
-            if (_held[CTL_STEER_LEFT] > 0)
-                vpad_axis(SDL_CONTROLLER_AXIS_LEFTX, -1.0f);
-            else if (_held[CTL_STEER_RIGHT] > 0)
-                vpad_axis(SDL_CONTROLLER_AXIS_LEFTX, 1.0f);
-            else
-                vpad_axis(SDL_CONTROLLER_AXIS_LEFTX, 0.0f);
-        } else if (k_ctls[i].target == 1003) {
-            /* Steer Right Button */
-            if (_held[CTL_STEER_RIGHT] > 0)
-                vpad_axis(SDL_CONTROLLER_AXIS_LEFTX, 1.0f);
-            else if (_held[CTL_STEER_LEFT] > 0)
-                vpad_axis(SDL_CONTROLLER_AXIS_LEFTX, -1.0f);
-            else
-                vpad_axis(SDL_CONTROLLER_AXIS_LEFTX, 0.0f);
-        }
-    } else if (k_ctls[i].kind == CTL_TRIGGER) {
-        vpad_axis(k_ctls[i].target, was ? 0.0f : 1.0f);
-    } else {
-        vpad_button(k_ctls[i].target, !was);
-    }
-
+    BOOL was = _held[i] != 0;
+    if (delta > 0) _held[i] += (unsigned)delta;
+    else _held[i] = (unsigned)(-delta) > _held[i] ? 0 : _held[i] - (unsigned)(-delta);
+    if ((_held[i] != 0) == was) return;
+    if (!was) [_haptic impactOccurred];
+    [self sendInput];
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    uint32_t color = k_ctls[i].colorHex;
-    if (!was) {
-        _shape[i].fillColor = colorFromHex(color, 0.65).CGColor;
-        _shape[i].strokeColor = colorFromHex(color, 1.0).CGColor;
-        _shape[i].lineWidth = 2.5;
-        _shape[i].shadowOpacity = 0.85;
-    } else {
-        _shape[i].fillColor = colorFromHex(color, 0.20).CGColor;
-        _shape[i].strokeColor = colorFromHex(color, 0.85).CGColor;
-        _shape[i].lineWidth = 2.0;
-        _shape[i].shadowOpacity = 0.0;
-    }
-    [CATransaction commit];
-}
-
-- (void)moveStick:(CGPoint)p
-{
-    CGFloat dx = p.x - _stickCentre.x, dy = p.y - _stickCentre.y;
-    CGFloat len = sqrt(dx * dx + dy * dy), r = _stickRadius, k = r * 0.42;
-
-    if (len > r) {
-        dx *= r / len;
-        dy *= r / len;
-    }
-    vpad_axis(SDL_CONTROLLER_AXIS_LEFTX, (float)(dx / r));
-    vpad_axis(SDL_CONTROLLER_AXIS_LEFTY, (float)(dy / r));
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    _stickKnob.path = [UIBezierPath bezierPathWithOvalInRect:
-                       CGRectMake(_stickCentre.x + dx - k, _stickCentre.y + dy - k, 2 * k, 2 * k)].CGPath;
-    [CATransaction commit];
-}
-
-- (void)endStick
-{
-    _stickTouch = nil;
-    _stickCentre = _stickHome;
-    vpad_axis(SDL_CONTROLLER_AXIS_LEFTX, 0);
-    vpad_axis(SDL_CONTROLLER_AXIS_LEFTY, 0);
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    [self drawStick];
+    _shape[i].fillColor = [UIColor colorWithWhite:1 alpha:was ? .10 : .4].CGColor;
     [CATransaction commit];
 }
 
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event
 {
     for (UITouch *t in touches) {
-        CGPoint p = [t locationInView:self];
-        int c = [self controlAt:p];
-        if (c >= 0) {
-            [_bound setObject:@(c) forKey:t];
-            [self setHeld:c delta:+1];
-        } else if (c == CTL_STICK && !_stickTouch) {
-            CGFloat r = _stickRadius;
-            _stickTouch = t;
-            _stickCentre = CGPointMake(MAX(p.x, r), MIN(MAX(p.y, r), self.bounds.size.height - r));
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            [self drawStick];
-            [CATransaction commit];
-            [self moveStick:p];
-        }
+        int c = [self controlAt:[t locationInView:self]];
+        [_bound setObject:@(c) forKey:t];
+        if (c >= 0) [self setHeld:c delta:1];
     }
 }
 
+/* Slide off to release; slide between arrows/pedals without lifting. */
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event
 {
     for (UITouch *t in touches) {
-        CGPoint p = [t locationInView:self];
-        NSNumber *b;
-        int c;
-
-        if (t == _stickTouch) {
-            [self moveStick:p];
-            continue;
-        }
-        b = [_bound objectForKey:t];
-        if (!b)
-            continue;
-        c = [self controlAt:p];
-        if (c >= 0 && c != b.intValue) {
-            [self setHeld:b.intValue delta:-1];
-            [_bound setObject:@(c) forKey:t];
-            [self setHeld:c delta:+1];
-        }
+        NSNumber *old = [_bound objectForKey:t];
+        if (!old) continue;
+        int c = [self controlAt:[t locationInView:self]];
+        if (c == old.intValue) continue;
+        if (old.intValue >= 0) [self setHeld:old.intValue delta:-1];
+        [_bound setObject:@(c) forKey:t];
+        if (c >= 0) [self setHeld:c delta:1];
     }
 }
 
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event
 {
     for (UITouch *t in touches) {
-        NSNumber *b = [_bound objectForKey:t];
-        if (t == _stickTouch)
-            [self endStick];
-        if (b) {
-            [self setHeld:b.intValue delta:-1];
-            [_bound removeObjectForKey:t];
-        }
+        NSNumber *old = [_bound objectForKey:t];
+        if (old && old.intValue >= 0) [self setHeld:old.intValue delta:-1];
+        [_bound removeObjectForKey:t];
     }
 }
 
@@ -932,20 +475,31 @@ static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
 
 - (void)releaseAll
 {
-    for (int i = 0; i < NCTL; i++)
-        if (_held[i])
-            [self setHeld:i delta:-_held[i]];
+    memset(_held, 0, sizeof _held);
     [_bound removeAllObjects];
-    if (_stickTouch)
-        [self endStick];
-    vpad_axis(SDL_CONTROLLER_AXIS_LEFTX, 0);
-    vpad_axis(SDL_CONTROLLER_AXIS_LEFTY, 0);
+    [self sendInput];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    for (int i = 0; i < NCTL; i++) _shape[i].fillColor = [UIColor colorWithWhite:1 alpha:.10].CGColor;
+    [CATransaction commit];
+}
+
+- (void)dealloc
+{
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 @end
 
 static NFSTouchView *s_view;
+
+void ios_touch_update_auto(void)
+{
+    if (s_view) [s_view applyAutomaticMode:nfsu2_mobile_layout_mode()];
+}
+
 static int           s_always;          /* NFSU2_TOUCH=2 */
 
+/* A game controller that is not ours. */
 static int physical_controllers(void)
 {
     int n = 0;
@@ -957,30 +511,41 @@ static int physical_controllers(void)
 
 void ios_touch_controllers_changed(void)
 {
-    int show;
+    static int lastPhysical = -1;
+    int show, physical;
 
     if (!s_view)
         return;
-    show = s_always || physical_controllers() == 0;
+    physical = physical_controllers();
+    show = s_always || physical == 0;
+    int reorder = s_always && physical > 0 && physical != lastPhysical;
+    lastPhysical = physical;
     for (int i = 0; i < SDL_NumJoysticks(); i++)
         fprintf(stderr, "[ios] joystick %d: %s%s%s\n", i,
                 SDL_JoystickNameForIndex(i) ? SDL_JoystickNameForIndex(i) : "?",
                 SDL_JoystickIsVirtual(i) ? " (virtual)" : "",
                 SDL_IsGameController(i) ? "" : " (not a game controller)");
-    if (show == !s_view.hidden)
+    if (show == s_view.padVisible && !reorder && (!show || s_vpad))
         return;
     if (show) {
+        /* Reattach last when a real controller arrives: SDL's index order
+         * then gives the physical pad port 0, including NFSU2_TOUCH=2. */
+        if (reorder) { [s_view releaseAll]; vpad_detach(); }
         vpad_attach();
+        [s_view releaseAll];
     } else {
         [s_view releaseAll];
         vpad_detach();
     }
-    s_view.hidden = !show;
+    s_view.padVisible = show;
     fprintf(stderr, "[ios] touch controls %s\n", show ? "on" : "off (controller connected)");
 }
 
+/* Called once SDL's Metal view exists (the Vulkan surface is made on the
+ * main thread), so the overlay goes on top of it. */
 void ios_touch_attach(SDL_Window *window)
 {
+    ios_music_start();
     SDL_SysWMinfo info;
     const char *e = getenv("NFSU2_TOUCH");
     UIView *root;
@@ -996,7 +561,7 @@ void ios_touch_attach(SDL_Window *window)
         return;
     if (!s_view) {
         s_view = [[NFSTouchView alloc] initWithFrame:root.bounds];
-        s_view.hidden = YES;
+        s_view.padVisible = NO;
         [root addSubview:s_view];
     }
     [root bringSubviewToFront:s_view];

@@ -11,13 +11,5 @@
  * run loop); nil if none connected. */
 UIWindowScene *ios_window_scene(void);
 
-/* Screen presentation modes for modern iPhones:
- * 0: Fit (16:9 Letterboxed)
- * 1: Fullscreen Stretch (Edge-to-Edge OLED Fill)
- * 2: Zoom (Aspect Fill without bars) */
-int ios_get_screen_mode(void);
-void ios_set_screen_mode(int mode);
-int ios_cycle_screen_mode(void);
-
 #endif
 

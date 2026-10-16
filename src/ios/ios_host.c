@@ -105,8 +105,8 @@ void ios_host_setup(void)
         const char *e = getenv("NFSU2_ENV_FILE");
         path_join(path, sizeof path, docs, "nfsu2x_env.txt");
         nenv = (e && *e == '0') ? -1 : read_env_file(path);
-    }
-
+    setenv("NFSU2_FPS_LIMIT", "0", 0);
+    setenv("RECOMP_GL_SCALE", "4", 0);
     path_join(path, sizeof path, docs, "game");
     mkdir(path, 0755);
     {

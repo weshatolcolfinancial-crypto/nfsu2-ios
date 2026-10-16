@@ -78,6 +78,13 @@
 	</dict>
 	<key>UILaunchScreen</key>
 	<dict/>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
+	<key>LSSupportsGameMode</key>
+	<true/>
+	<!-- Compatibility with iOS 18.0–18.5. -->
+	<key>GCSupportsGameMode</key>
+	<true/>
 	<key>UIRequiresFullScreen</key>
 	<true/>
 	<key>UIStatusBarHidden</key>
