@@ -55,7 +55,7 @@ static NSString *xbe_sha1(NSString *path)
 static NSString *find_xbe_in_dir(NSFileManager *fm, NSString *dirPath)
 {
     BOOL isDir = NO;
-    if (![fm fileExistsAtPath:dirPath isDirectory:&isDir] || !isDir)
+    if (!dirPath || ![fm fileExistsAtPath:dirPath isDirectory:&isDir] || !isDir)
         return nil;
     NSString *direct = [dirPath stringByAppendingPathComponent:@"default.xbe"];
     if ([fm fileExistsAtPath:direct])
@@ -68,6 +68,63 @@ static NSString *find_xbe_in_dir(NSFileManager *fm, NSString *dirPath)
         if ([name.lowercaseString isEqualToString:@"default.xbe"])
             return [dirPath stringByAppendingPathComponent:name];
     }
+    return nil;
+}
+
+static void ensure_canonical_xbe(NSFileManager *fm, NSString *dirPath, NSString *xbePath)
+{
+    NSString *canonical = [dirPath stringByAppendingPathComponent:@"default.xbe"];
+    if (![xbePath isEqualToString:canonical] && ![fm fileExistsAtPath:canonical]) {
+        [fm moveItemAtPath:xbePath toPath:canonical error:nil];
+    }
+}
+
+/* Automatically search Documents/ and its subdirectories for default.xbe.
+ * Returns the directory containing default.xbe if found, or nil. */
+static NSString *auto_detect_game_directory(NSString *configuredGameDir)
+{
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *xbe;
+
+    /* 1. Check configured game directory (Documents/game) */
+    if ((xbe = find_xbe_in_dir(fm, configuredGameDir))) {
+        ensure_canonical_xbe(fm, configuredGameDir, xbe);
+        return configuredGameDir;
+    }
+
+    /* 2. Check parent Documents/ folder directly */
+    NSString *docsDir = [configuredGameDir stringByDeletingLastPathComponent];
+    if ((xbe = find_xbe_in_dir(fm, docsDir))) {
+        ensure_canonical_xbe(fm, docsDir, xbe);
+        return docsDir;
+    }
+
+    /* 3. Check immediate subdirectories of Documents/ (e.g. Documents/NFSU2, Documents/extracted) */
+    NSArray<NSString *> *subdirs = [fm contentsOfDirectoryAtPath:docsDir error:nil];
+    for (NSString *name in subdirs) {
+        if ([name isEqualToString:@"game"])
+            continue;
+        NSString *subPath = [docsDir stringByAppendingPathComponent:name];
+        BOOL isDir = NO;
+        if ([fm fileExistsAtPath:subPath isDirectory:&isDir] && isDir) {
+            if ((xbe = find_xbe_in_dir(fm, subPath))) {
+                ensure_canonical_xbe(fm, subPath, xbe);
+                return subPath;
+            }
+            /* 4. Check 1 more level deep (e.g. Documents/NFSU2/game/default.xbe) */
+            NSArray<NSString *> *subSub = [fm contentsOfDirectoryAtPath:subPath error:nil];
+            for (NSString *subName in subSub) {
+                NSString *deepPath = [subPath stringByAppendingPathComponent:subName];
+                if ([fm fileExistsAtPath:deepPath isDirectory:&isDir] && isDir) {
+                    if ((xbe = find_xbe_in_dir(fm, deepPath))) {
+                        ensure_canonical_xbe(fm, deepPath, xbe);
+                        return deepPath;
+                    }
+                }
+            }
+        }
+    }
+
     return nil;
 }
 
@@ -157,71 +214,146 @@ static BOOL copy_file(NSString *from, NSString *to, char *buf,
 
 @implementation NFSImportController {
     UILabel        *_status;
-    UIButton       *_choose;
+    UIButton       *_autoDetectBtn;
+    UIButton       *_pickFileBtn;
+    UIButton       *_pickFolderBtn;
     UIProgressView *_bar;
+}
+
+- (void)dealloc
+{
+    [NSNotificationCenter.defaultCenter removeObserver:self];
 }
 
 - (void)viewDidLoad
 {
     UILabel *title = [UILabel new], *body = [UILabel new];
-    UIStackView *stack;
-    UIButtonConfiguration *cfg = [UIButtonConfiguration filledButtonConfiguration];
+    UIStackView *stack, *btnStack;
 
     [super viewDidLoad];
-    self.view.backgroundColor = UIColor.blackColor;
+    self.view.backgroundColor = [UIColor colorWithRed:0.07 green:0.07 blue:0.09 alpha:1.0];
+
     title.text = @"Need for Speed: Underground 2";
-    title.font = [UIFont boldSystemFontOfSize:24];
+    title.font = [UIFont boldSystemFontOfSize:22];
     title.textColor = UIColor.whiteColor;
-    body.text = @"Choose the folder with your extracted Xbox disc (NTSC-U) or select "
-                @"default.xbe directly. Files are copied into the app (about 2.5 GB). "
-                @"You can also copy files into Documents/game with the Files app or Finder.";
+    title.textAlignment = NSTextAlignmentCenter;
+
+    body.text = @"Game files not detected yet.\n\n"
+                @"Recommended (Easiest — No picker needed):\n"
+                @"1. Open the Files app on your device\n"
+                @"2. Go to: On My iPhone (or iPad) ➔ NFSU2 ➔ game\n"
+                @"   (or paste directly into the NFSU2 folder)\n"
+                @"3. Return here — files will auto-detect!\n\n"
+                @"Or select default.xbe with the picker below:";
     body.numberOfLines = 0;
-    body.textAlignment = NSTextAlignmentCenter;
-    body.textColor = [UIColor colorWithWhite:0.8 alpha:1];
-    cfg.title = @"Choose Game Folder or default.xbe…";
-    _choose = [UIButton buttonWithConfiguration:cfg primaryAction:
-               [UIAction actionWithHandler:^(UIAction *a) { [self pick]; }]];
+    body.textAlignment = NSTextAlignmentLeft;
+    body.font = [UIFont systemFontOfSize:14];
+    body.textColor = [UIColor colorWithWhite:0.85 alpha:1];
+
+    UIButtonConfiguration *cfgAuto = [UIButtonConfiguration filledButtonConfiguration];
+    cfgAuto.title = @"Auto-Detect / Refresh Game Files";
+    cfgAuto.baseBackgroundColor = [UIColor colorWithRed:0.18 green:0.55 blue:0.34 alpha:1.0];
+    cfgAuto.baseForegroundColor = UIColor.whiteColor;
+    _autoDetectBtn = [UIButton buttonWithConfiguration:cfgAuto primaryAction:
+                      [UIAction actionWithHandler:^(UIAction *a) { [self checkAutoDetectManual]; }]];
+
+    UIButtonConfiguration *cfgFile = [UIButtonConfiguration tintedButtonConfiguration];
+    cfgFile.title = @"Pick default.xbe File…";
+    _pickFileBtn = [UIButton buttonWithConfiguration:cfgFile primaryAction:
+                    [UIAction actionWithHandler:^(UIAction *a) { [self pickFile]; }]];
+
+    UIButtonConfiguration *cfgFolder = [UIButtonConfiguration grayButtonConfiguration];
+    cfgFolder.title = @"Pick Game Folder…";
+    _pickFolderBtn = [UIButton buttonWithConfiguration:cfgFolder primaryAction:
+                      [UIAction actionWithHandler:^(UIAction *a) { [self pickFolder]; }]];
+
     _bar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
     _bar.hidden = YES;
+
     _status = [UILabel new];
     _status.numberOfLines = 0;
     _status.textAlignment = NSTextAlignmentCenter;
-    _status.textColor = [UIColor colorWithWhite:0.7 alpha:1];
-    _status.font = [UIFont systemFontOfSize:14];
+    _status.textColor = [UIColor colorWithWhite:0.75 alpha:1];
+    _status.font = [UIFont systemFontOfSize:13];
 
-    stack = [[UIStackView alloc] initWithArrangedSubviews:@[ title, body, _choose, _bar, _status ]];
+    btnStack = [[UIStackView alloc] initWithArrangedSubviews:@[ _autoDetectBtn, _pickFileBtn, _pickFolderBtn ]];
+    btnStack.axis = UILayoutConstraintAxisVertical;
+    btnStack.spacing = 10;
+    btnStack.alignment = UIStackViewAlignmentFill;
+
+    stack = [[UIStackView alloc] initWithArrangedSubviews:@[ title, body, btnStack, _bar, _status ]];
     stack.axis = UILayoutConstraintAxisVertical;
     stack.alignment = UIStackViewAlignmentCenter;
-    stack.spacing = 18;
+    stack.spacing = 16;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:stack];
+
     [NSLayoutConstraint activateConstraints:@[
         [stack.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         [stack.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
-        [stack.widthAnchor constraintLessThanOrEqualToConstant:560],
-        [stack.widthAnchor constraintLessThanOrEqualToAnchor:self.view.safeAreaLayoutGuide.widthAnchor
-                                                    constant:-40],
+        [stack.widthAnchor constraintLessThanOrEqualToConstant:580],
+        [stack.widthAnchor constraintLessThanOrEqualToAnchor:self.view.safeAreaLayoutGuide.widthAnchor constant:-32],
         [body.widthAnchor constraintEqualToAnchor:stack.widthAnchor],
+        [btnStack.widthAnchor constraintEqualToAnchor:stack.widthAnchor],
         [_status.widthAnchor constraintEqualToAnchor:stack.widthAnchor],
         [_bar.widthAnchor constraintEqualToAnchor:stack.widthAnchor],
     ]];
+
+    [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(onAppBecameActive)
+                                               name:UIApplicationDidBecomeActiveNotification
+                                             object:nil];
 }
 
-- (void)pick
+- (void)onAppBecameActive
 {
-    NSMutableArray<UTType *> *types = [NSMutableArray arrayWithCapacity:8];
-    [types addObject:UTTypeFolder];
-    [types addObject:UTTypeItem];
-    [types addObject:UTTypeData];
-    [types addObject:UTTypeContent];
+    [self checkAutoDetectSilent];
+}
 
+- (BOOL)checkAutoDetectSilent
+{
+    NSString *detected = auto_detect_game_directory(self.gameDir);
+    if (detected) {
+        fprintf(stderr, "[ios] auto-detected game files in %s\n", detected.fileSystemRepresentation);
+        setenv("NFSU2_GAME_DIR", detected.fileSystemRepresentation, 1);
+        _status.text = [NSString stringWithFormat:@"Found game in %@! Starting…", detected.lastPathComponent];
+        _bar.hidden = YES;
+        self.done = YES;
+        return YES;
+    }
+    return NO;
+}
+
+- (void)checkAutoDetectManual
+{
+    if (![self checkAutoDetectSilent]) {
+        _status.text = @"default.xbe not found in Documents or Documents/game yet.\nCheck that your extracted disc files are copied into the NFSU2 folder in Files.";
+    }
+}
+
+- (void)pickFile
+{
     UIDocumentPickerViewController *p =
-        [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types];
+        [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[ UTTypeItem, UTTypeData ]];
     p.delegate = self;
     p.allowsMultipleSelection = NO;
     if (p.popoverPresentationController) {
-        p.popoverPresentationController.sourceView = _choose;
-        p.popoverPresentationController.sourceRect = _choose.bounds;
+        p.popoverPresentationController.sourceView = _pickFileBtn;
+        p.popoverPresentationController.sourceRect = _pickFileBtn.bounds;
+        p.popoverPresentationController.permittedArrowDirections = UIPopoverArrowDirectionAny;
+    }
+    [self presentViewController:p animated:YES completion:nil];
+}
+
+- (void)pickFolder
+{
+    UIDocumentPickerViewController *p =
+        [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[ UTTypeFolder ]];
+    p.delegate = self;
+    p.allowsMultipleSelection = NO;
+    if (p.popoverPresentationController) {
+        p.popoverPresentationController.sourceView = _pickFolderBtn;
+        p.popoverPresentationController.sourceRect = _pickFolderBtn.bounds;
         p.popoverPresentationController.permittedArrowDirections = UIPopoverArrowDirectionAny;
     }
     [self presentViewController:p animated:YES completion:nil];
@@ -235,9 +367,11 @@ static BOOL copy_file(NSString *from, NSString *to, char *buf,
 
 - (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)picker
 {
-    _choose.enabled = YES;
+    _autoDetectBtn.enabled = YES;
+    _pickFileBtn.enabled = YES;
+    _pickFolderBtn.enabled = YES;
     _bar.hidden = YES;
-    _status.text = @"Import cancelled. Tap above to choose your game folder or default.xbe.";
+    _status.text = @"Picker cancelled. You can paste files into Files app or tap Auto-Detect.";
 }
 
 - (void)fail:(NSString *)why
@@ -245,7 +379,9 @@ static BOOL copy_file(NSString *from, NSString *to, char *buf,
     fprintf(stderr, "[ios] import failed: %s\n", why.UTF8String);
     _status.text = why;
     _bar.hidden = YES;
-    _choose.enabled = YES;
+    _autoDetectBtn.enabled = YES;
+    _pickFileBtn.enabled = YES;
+    _pickFolderBtn.enabled = YES;
 }
 
 - (void)importFrom:(NSURL *)picked
@@ -255,7 +391,9 @@ static BOOL copy_file(NSString *from, NSString *to, char *buf,
     UIApplication *app = UIApplication.sharedApplication;
     __block UIBackgroundTaskIdentifier task;
 
-    _choose.enabled = NO;
+    _autoDetectBtn.enabled = NO;
+    _pickFileBtn.enabled = NO;
+    _pickFolderBtn.enabled = NO;
     _bar.hidden = NO;
     _bar.progress = 0;
     _status.text = @"Preparing import…";
@@ -406,14 +544,20 @@ int ios_import_game(const char *game_dir)
     UIWindow *win;
     NFSImportController *vc;
 
-    if ([NSFileManager.defaultManager fileExistsAtPath:[game stringByAppendingPathComponent:@"default.xbe"]])
+    /* 1. Fast check: auto-detect if default.xbe is already in Documents/game, Documents, or any subfolder */
+    NSString *detected = auto_detect_game_directory(game);
+    if (detected) {
+        fprintf(stderr, "[ios] game files auto-detected in %s\n", detected.fileSystemRepresentation);
+        setenv("NFSU2_GAME_DIR", detected.fileSystemRepresentation, 1);
         return 1;
+    }
+
     scene = ios_window_scene();
     if (!scene) {
         fprintf(stderr, "[ios] no window scene for the game import\n");
         return 0;
     }
-    fprintf(stderr, "[ios] no default.xbe in %s: asking for the game folder\n", game_dir);
+    fprintf(stderr, "[ios] no default.xbe in %s: showing setup screen\n", game_dir);
     vc = [NFSImportController new];
     vc.gameDir = game;
     win = [[UIWindow alloc] initWithWindowScene:scene];

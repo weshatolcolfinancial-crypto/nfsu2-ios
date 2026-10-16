@@ -108,6 +108,23 @@ void ios_host_setup(void)
     }
 
     path_join(path, sizeof path, docs, "game");
+    mkdir(path, 0755);
+    {
+        char guide[1200];
+        path_join(guide, sizeof guide, path, "PLACE_GAME_FILES_HERE.txt");
+        if (access(guide, F_OK) != 0) {
+            FILE *gf = fopen(guide, "w");
+            if (gf) {
+                fputs("Need for Speed: Underground 2 (iOS)\n\n"
+                      "Copy your extracted Xbox disc files here:\n"
+                      " - default.xbe\n"
+                      " - NFSUNDER/\n"
+                      " - B3/ (if present)\n\n"
+                      "Then launch or switch back to the NFSU2 app.\n", gf);
+                fclose(gf);
+            }
+        }
+    }
     setenv("NFSU2_GAME_DIR", path, 0);
     setenv("XDG_DATA_HOME", support, 0);
     if (chdir(caches) != 0)
