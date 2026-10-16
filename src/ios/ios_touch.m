@@ -59,21 +59,21 @@ enum {
 };
 
 static const CtlDef k_ctls[NCTL] = {
-    [CTL_A]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_A,             "A",       "",    1, 0x2ECC71 }, /* Xbox Green */
-    [CTL_B]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_B,             "B",       "",    1, 0xE74C3C }, /* Xbox Red */
-    [CTL_X]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_X,             "X",       "",    1, 0x3498DB }, /* Xbox Blue */
-    [CTL_Y]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_Y,             "Y",       "",    1, 0xF1C40F }, /* Xbox Yellow */
-    [CTL_WHITE]       = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_LEFTSHOULDER,  "WHITE",   "",    0, 0xEEEEEE }, /* White/Silver */
-    [CTL_BLACK]       = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, "BLACK",   "",    0, 0x5DADE2 }, /* Cyan/Black */
-    [CTL_BACK]        = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_BACK,          "BACK ⧏",  "",    0, 0xBDC3C7 }, /* Menu */
-    [CTL_START]       = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_START,         "START ⧐", "",    0, 0xBDC3C7 }, /* Menu */
+    [CTL_A]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_A,             "E-BRAKE", "A",   0, 0x2ECC71 }, /* Handbrake / Accept */
+    [CTL_B]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_B,             "LOOK",    "B",   0, 0xE74C3C }, /* Look Back / Cancel */
+    [CTL_X]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_X,             "⚡ NOS",  "X",   0, 0x00E5FF }, /* Nitrous Oxide Boost */
+    [CTL_Y]           = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_Y,             "CAM",     "Y",   0, 0xF1C40F }, /* Camera View / Reset */
+    [CTL_WHITE]       = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_LEFTSHOULDER,  "🎵 MUSIC","LB",  0, 0xEEEEEE }, /* EA Trax Music Track (White/LB) */
+    [CTL_BLACK]       = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, "🗺 MAP",  "RB",  0, 0x4A90E2 }, /* In-Game GPS Map (Black/RB) */
+    [CTL_BACK]        = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_BACK,          "BACK ⧏", "",    0, 0xBDC3C7 }, /* Menu / Map */
+    [CTL_START]       = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_START,         "START ⧐","",    0, 0xBDC3C7 }, /* Menu Pause */
     [CTL_DPAD_UP]     = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_DPAD_UP,       "▲",       "",    0, 0x85C1E9 }, /* D-Pad */
     [CTL_DPAD_DOWN]   = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_DPAD_DOWN,     "▼",       "",    0, 0x85C1E9 }, /* D-Pad */
     [CTL_DPAD_LEFT]   = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_DPAD_LEFT,     "◀",       "",    0, 0x85C1E9 }, /* D-Pad */
     [CTL_DPAD_RIGHT]  = { CTL_BUTTON,  SDL_CONTROLLER_BUTTON_DPAD_RIGHT,    "▶",       "",    0, 0x85C1E9 }, /* D-Pad */
     [CTL_BRAKE]       = { CTL_TRIGGER, SDL_CONTROLLER_AXIS_TRIGGERLEFT,     "BRAKE",   "LT",  0, 0xFF3D00 }, /* Cherry Red */
     [CTL_GAS]         = { CTL_TRIGGER, SDL_CONTROLLER_AXIS_TRIGGERRIGHT,    "GAS",     "RT",  0, 0x00E676 }, /* Electric Green */
-    [CTL_SCREEN_MODE] = { CTL_SPECIAL, 1001,                                "⛶ FULL",  "",    0, 0x00E5FF }, /* Cyan Aspect */
+    [CTL_SCREEN_MODE] = { CTL_SPECIAL, 1001,                                "⛶ FULL",  "",    0, 0x00E5FF }, /* Aspect Mode */
 };
 
 enum { CTL_STICK = -1 };
@@ -270,9 +270,15 @@ static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
         _text[i].contentsScale = scale;
         _text[i].foregroundColor = [UIColor colorWithWhite:1.0 alpha:0.95].CGColor;
 
-        if (k_ctls[i].round) {
-            _text[i].fontSize = 20;
-            _text[i].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:20 weight:UIFontWeightBold];
+        if (i == CTL_X) {
+            _text[i].fontSize = 17;
+            _text[i].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:17 weight:UIFontWeightHeavy];
+        } else if (i == CTL_A) {
+            _text[i].fontSize = 13;
+            _text[i].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:13 weight:UIFontWeightHeavy];
+        } else if (i == CTL_B || i == CTL_Y) {
+            _text[i].fontSize = 13;
+            _text[i].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:13 weight:UIFontWeightBold];
         } else if (i == CTL_GAS || i == CTL_BRAKE) {
             _text[i].fontSize = 16;
             _text[i].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:16 weight:UIFontWeightHeavy];
@@ -290,9 +296,9 @@ static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
             _subtext[i].string = [NSString stringWithUTF8String:k_ctls[i].sublabel];
             _subtext[i].alignmentMode = kCAAlignmentCenter;
             _subtext[i].contentsScale = scale;
-            _subtext[i].foregroundColor = [UIColor colorWithWhite:1.0 alpha:0.75].CGColor;
-            _subtext[i].fontSize = 12;
-            _subtext[i].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:12 weight:UIFontWeightBold];
+            _subtext[i].foregroundColor = [UIColor colorWithWhite:1.0 alpha:0.80].CGColor;
+            _subtext[i].fontSize = 11;
+            _subtext[i].font = (__bridge CFTypeRef)[UIFont systemFontOfSize:11 weight:UIFontWeightBold];
             [self.layer addSublayer:_subtext[i]];
         }
     }
@@ -324,13 +330,13 @@ static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
 - (void)placeControl:(int)i rect:(CGRect)r
 {
     _frame[i] = r;
-    CGFloat corner = k_ctls[i].round ? (r.size.width / 2) : 12;
+    CGFloat corner = 14;
     if (i == CTL_GAS || i == CTL_BRAKE) corner = 20;
-    if (i == CTL_WHITE || i == CTL_BLACK || i == CTL_BACK || i == CTL_START || i == CTL_SCREEN_MODE) corner = 14;
+    else if (i == CTL_X || i == CTL_A) corner = 16;
+    else if (i == CTL_B || i == CTL_Y) corner = 14;
+    else if (i == CTL_WHITE || i == CTL_BLACK || i == CTL_BACK || i == CTL_START || i == CTL_SCREEN_MODE) corner = 14;
 
-    _shape[i].path = (k_ctls[i].round
-                      ? [UIBezierPath bezierPathWithOvalInRect:r]
-                      : [UIBezierPath bezierPathWithRoundedRect:r cornerRadius:corner]).CGPath;
+    _shape[i].path = [UIBezierPath bezierPathWithRoundedRect:r cornerRadius:corner].CGPath;
 
     if (_subtext[i]) {
         CGFloat th = 18, sh = 12;
@@ -430,30 +436,34 @@ static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
 
-    /* ── Right side: Ergonomic Racing Layout ── */
+    /* ── Right side: Ergonomic Two-Column Racing Layout ── */
     /* Gas Pedal (bottom-right) */
-    CGFloat w_gas = 78, h_gas = 126;
+    CGFloat w_gas = 80, h_gas = 120;
     CGRect r_gas = CGRectMake(safeR - w_gas, safeB - h_gas, w_gas, h_gas);
 
     /* Brake Pedal (to the left of Gas) */
-    CGFloat w_brake = 72, h_brake = 106;
+    CGFloat w_brake = 76, h_brake = 105;
     CGRect r_brake = CGRectMake(safeR - w_gas - 14 - w_brake, safeB - h_brake, w_brake, h_brake);
 
-    /* Face Buttons Diamond (A, B, X, Y):
-     * Placed ergonomically above the pedals right where the right thumb rolls */
-    CGFloat f = 52;
-    CGFloat fx = safeR - 128;
-    CGFloat fy = safeB - 175;
-    CGFloat f_dist = 40;
+    /* ⚡ NOS (X) - Prominent, glowing Nitrous Oxide boost button directly above Gas */
+    CGFloat h_nos = 52;
+    CGRect r_nos = CGRectMake(safeR - w_gas, safeB - h_gas - 12 - h_nos, w_gas, h_nos);
 
-    CGRect r_y = CGRectMake(fx - f/2, fy - f_dist - f/2, f, f);          /* Y: Camera / Reset */
-    CGRect r_a = CGRectMake(fx - f/2, fy + f_dist - f/2, f, f);          /* A: Handbrake / Accept */
-    CGRect r_x = CGRectMake(fx - f_dist - f/2, fy - f/2, f, f);          /* X: NOS / Boost */
-    CGRect r_b = CGRectMake(fx + f_dist - f/2, fy - f/2, f, f);          /* B: Look Back / Cancel */
+    /* E-BRAKE (A) - Handbrake button directly above Brake */
+    CGFloat h_a = 52;
+    CGRect r_a = CGRectMake(safeR - w_gas - 14 - w_brake, safeB - h_brake - 12 - h_a, w_brake, h_a);
 
-    /* Shoulder buttons: White & Black at upper right */
-    CGFloat s_w = 62, s_h = 30;
-    CGRect r_white = CGRectMake(safeR - s_w * 2 - 12, safeT + 4, s_w, s_h);
+    /* LOOK BACK (B) - Directly above NOS */
+    CGFloat h_b = 44;
+    CGRect r_b = CGRectMake(safeR - w_gas, safeB - h_gas - 12 - h_nos - 10 - h_b, w_gas, h_b);
+
+    /* CAMERA (Y) - Directly above E-BRAKE */
+    CGFloat h_y = 44;
+    CGRect r_y = CGRectMake(safeR - w_gas - 14 - w_brake, safeB - h_brake - 12 - h_a - 10 - h_y, w_brake, h_y);
+
+    /* Shoulder buttons: 🎵 MUSIC (White/LB) & 🗺 MAP (Black/RB) at upper right */
+    CGFloat s_w = 78, s_h = 30;
+    CGRect r_white = CGRectMake(safeR - s_w * 2 - 10, safeT + 4, s_w, s_h);
     CGRect r_black = CGRectMake(safeR - s_w, safeT + 4, s_w, s_h);
 
     /* Top center controls: Back, Screen Mode, Start */
@@ -540,9 +550,9 @@ static UIColor *colorFromHex(uint32_t hex, CGFloat alpha)
         return;
 
     if (!was) {
-        if (i == CTL_GAS || i == CTL_BRAKE)
+        if (i == CTL_GAS || i == CTL_BRAKE || i == CTL_X)
             [_hapticHeavy impactOccurred];
-        else if (i == CTL_A || i == CTL_B || i == CTL_X || i == CTL_Y ||
+        else if (i == CTL_A || i == CTL_B || i == CTL_Y ||
                  (i >= CTL_DPAD_UP && i <= CTL_DPAD_RIGHT))
             [_hapticMedium impactOccurred];
         else
