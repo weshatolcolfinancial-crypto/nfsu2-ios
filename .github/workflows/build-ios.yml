@@ -178,7 +178,7 @@ jobs:
             TAG="${{ github.ref_name }}"
           fi
           if [ "$TAG" = "ios" ] || [ "$TAG" = "main" ] || [ -z "$TAG" ]; then
-            TAG="v0.1.0-ios"
+            TAG="v0.3.0-ios"
           fi
           echo "RELEASE_TAG=$TAG" >> $GITHUB_ENV
           echo "Release tag: $TAG"
@@ -188,18 +188,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cat << 'EOF' > /tmp/release_notes.md
-          ### Need for Speed: Underground 2 — iOS Port (Metal / MoltenVK)
+          ### Need for Speed: Underground 2 — iOS Port (Metal / MoltenVK) v0.3
 
           **Automated iOS IPA Build**
 
-          #### Installation
-          1. Sideload **`NFSU2-iOS.ipa`** onto your iPhone or iPad using **AltStore**, **Sideloadly**, **TrollStore**, **LiveContainer**, **Scarlet**, or **Esign**.
-          2. Place your extracted Xbox disc files in the app container (`Documents/game/`) or select the extracted folder via the in-app document picker on first boot.
+          #### What's New in v0.3
+          - **Optimized Metal Renderer:** State and MSL binding caches, transform constant reuse, tile pass clears, and asynchronous GPU profiling.
+          - **120Hz ProMotion & Frame Pacing:** Uncapped software flip (`xbox_apple_immediate_flip`) with `CADisableMinimumFrameDurationOnPhone` and iOS 18 Game Mode.
+          - **Modular Touch Controls & Editor:** Live in-game settings modal with interactive layout customizer, button scaling, opacity, position, action remapping, and Arrow keys steering.
+          - **Automatic Layout Switching:** Observes race and pause game flow states to seamlessly alternate between Drive and Menu layouts.
+          - **Streaming Xbox ISO Extractor:** Direct `.iso` / `.xiso` disc image extraction on-device with path validation and progress bar.
+          - **Custom In-Game Music Player:** Play your own MP3s from `Documents/Music` via the built-in playlist controller while keeping in-game SFX.
+          - **PAL & NTSC-U Profiles:** Support for both European PAL and NTSC-U retail Xbox editions.
 
-          #### Notes
-          - **Renderer:** Native **Metal** (iOS 17+) with **MoltenVK** fallback (iOS 16+).
-          - **Controls:** Touch overlay (floating virtual stick, pedals, face buttons) and physical controllers (Xbox, DualSense, MFi).
-          - **Entitlements:** Expanded memory limit enabled (`com.apple.developer.kernel.increased-memory-limit`).
+          #### Installation
+          1. Sideload **`NFSU2-iOS.ipa`** onto your iPhone or iPad using **AltStore**, **TrollStore**, **Sideloadly**, **LiveContainer**, **Scarlet**, or **Esign**.
+          2. Place your Xbox disc `.iso` or extracted folder into `Documents/` or select it directly via the in-app file picker on first launch.
           EOF
 
           if [ "$IS_STUB_BUILD" = "1" ]; then
