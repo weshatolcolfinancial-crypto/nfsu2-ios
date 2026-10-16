@@ -52,18 +52,56 @@ static NSString *xbe_sha1(NSString *path)
     return hex;
 }
 
-/* The picked folder, or a folder right inside it, that holds default.xbe. */
+static NSString *find_xbe_in_dir(NSFileManager *fm, NSString *dirPath)
+{
+    BOOL isDir = NO;
+    if (![fm fileExistsAtPath:dirPath isDirectory:&isDir] || !isDir)
+        return nil;
+    NSString *direct = [dirPath stringByAppendingPathComponent:@"default.xbe"];
+    if ([fm fileExistsAtPath:direct])
+        return direct;
+    direct = [dirPath stringByAppendingPathComponent:@"DEFAULT.XBE"];
+    if ([fm fileExistsAtPath:direct])
+        return direct;
+    NSArray<NSString *> *entries = [fm contentsOfDirectoryAtPath:dirPath error:nil];
+    for (NSString *name in entries) {
+        if ([name.lowercaseString isEqualToString:@"default.xbe"])
+            return [dirPath stringByAppendingPathComponent:name];
+    }
+    return nil;
+}
+
+/* The picked folder, or a folder right inside it, that holds default.xbe.
+ * Also handles if the user directly picked default.xbe or a file inside the disc. */
 static NSURL *disc_root(NSURL *picked)
 {
     NSFileManager *fm = NSFileManager.defaultManager;
-    NSArray<NSURL *> *kids;
+    BOOL isDir = NO;
+    NSURL *candidate = picked;
 
-    if ([fm fileExistsAtPath:[picked URLByAppendingPathComponent:@"default.xbe"].path])
-        return picked;
-    kids = [fm contentsOfDirectoryAtURL:picked includingPropertiesForKeys:nil options:0 error:nil];
-    for (NSURL *k in kids)
-        if ([fm fileExistsAtPath:[k URLByAppendingPathComponent:@"default.xbe"].path])
+    if (![fm fileExistsAtPath:picked.path isDirectory:&isDir] || !isDir) {
+        candidate = [picked URLByDeletingLastPathComponent];
+    }
+
+    /* 1. Check if candidate or any of its ancestors holds default.xbe */
+    NSURL *up = candidate;
+    for (int i = 0; i < 4 && up && ![up.path isEqualToString:@"/"]; i++) {
+        if (find_xbe_in_dir(fm, up.path))
+            return up;
+        up = [up URLByDeletingLastPathComponent];
+    }
+
+    /* 2. Check immediate subdirectories of candidate */
+    NSArray<NSURL *> *kids = [fm contentsOfDirectoryAtURL:candidate
+                               includingPropertiesForKeys:@[ NSURLIsDirectoryKey ]
+                                                  options:0
+                                                    error:nil];
+    for (NSURL *k in kids) {
+        NSNumber *kDir = nil;
+        [k getResourceValue:&kDir forKey:NSURLIsDirectoryKey error:nil];
+        if (kDir.boolValue && find_xbe_in_dir(fm, k.path))
             return k;
+    }
     return nil;
 }
 
@@ -76,6 +114,15 @@ static BOOL copy_file(NSString *from, NSString *to, char *buf,
     BOOL ok = YES;
 
     if (!in || !out) {
+        NSError *copyErr = nil;
+        if ([NSFileManager.defaultManager copyItemAtPath:from toPath:to error:&copyErr]) {
+            NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:to error:nil];
+            if (progress && attrs)
+                progress(attrs.fileSize);
+            if (in) fclose(in);
+            if (out) fclose(out);
+            return YES;
+        }
         *err = [NSString stringWithFormat:@"%@: %s%@", from.lastPathComponent, strerror(errno),
                 errno == ENOENT ? @" (if it is in iCloud, download it in Files first)" : @""];
         if (in)
@@ -125,13 +172,13 @@ static BOOL copy_file(NSString *from, NSString *to, char *buf,
     title.text = @"Need for Speed: Underground 2";
     title.font = [UIFont boldSystemFontOfSize:24];
     title.textColor = UIColor.whiteColor;
-    body.text = @"Choose the folder with your extracted Xbox disc (NTSC-U): the one that "
-                @"holds default.xbe and NFSUNDER. It is copied into the app (about 2.5 GB). "
-                @"You can also copy it into the game folder with the Files app or Finder.";
+    body.text = @"Choose the folder with your extracted Xbox disc (NTSC-U) or select "
+                @"default.xbe directly. Files are copied into the app (about 2.5 GB). "
+                @"You can also copy files into Documents/game with the Files app or Finder.";
     body.numberOfLines = 0;
     body.textAlignment = NSTextAlignmentCenter;
     body.textColor = [UIColor colorWithWhite:0.8 alpha:1];
-    cfg.title = @"Choose Game Folder…";
+    cfg.title = @"Choose Game Folder or default.xbe…";
     _choose = [UIButton buttonWithConfiguration:cfg primaryAction:
                [UIAction actionWithHandler:^(UIAction *a) { [self pick]; }]];
     _bar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
@@ -162,10 +209,21 @@ static BOOL copy_file(NSString *from, NSString *to, char *buf,
 
 - (void)pick
 {
+    NSMutableArray<UTType *> *types = [NSMutableArray arrayWithCapacity:8];
+    [types addObject:UTTypeFolder];
+    [types addObject:UTTypeItem];
+    [types addObject:UTTypeData];
+    [types addObject:UTTypeContent];
+
     UIDocumentPickerViewController *p =
-        [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[ UTTypeFolder ]];
+        [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types];
     p.delegate = self;
     p.allowsMultipleSelection = NO;
+    if (p.popoverPresentationController) {
+        p.popoverPresentationController.sourceView = _choose;
+        p.popoverPresentationController.sourceRect = _choose.bounds;
+        p.popoverPresentationController.permittedArrowDirections = UIPopoverArrowDirectionAny;
+    }
     [self presentViewController:p animated:YES completion:nil];
 }
 
@@ -173,6 +231,13 @@ static BOOL copy_file(NSString *from, NSString *to, char *buf,
 {
     if (urls.count)
         [self importFrom:urls.firstObject];
+}
+
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)picker
+{
+    _choose.enabled = YES;
+    _bar.hidden = YES;
+    _status.text = @"Import cancelled. Tap above to choose your game folder or default.xbe.";
 }
 
 - (void)fail:(NSString *)why
@@ -193,17 +258,20 @@ static BOOL copy_file(NSString *from, NSString *to, char *buf,
     _choose.enabled = NO;
     _bar.hidden = NO;
     _bar.progress = 0;
-    _status.text = @"Copying…";
+    _status.text = @"Preparing import…";
     app.idleTimerDisabled = YES;
     task = [app beginBackgroundTaskWithExpirationHandler:^{
         [app endBackgroundTask:task];
         task = UIBackgroundTaskInvalid;
     }];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        BOOL bgScoped = [picked startAccessingSecurityScopedResource];
         NSString *err = [self copyFrom:picked into:tmp game:game];
-        if (scoped)
+        if (bgScoped)
             [picked stopAccessingSecurityScopedResource];
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (scoped)
+                [picked stopAccessingSecurityScopedResource];
             app.idleTimerDisabled = NO;
             if (task != UIBackgroundTaskInvalid)
                 [app endBackgroundTask:task];
@@ -231,7 +299,10 @@ static BOOL copy_file(NSString *from, NSString *to, char *buf,
     char *buf;
 
     if (!root)
-        return @"No default.xbe in that folder. Pick the folder of the extracted disc.";
+        return @"No default.xbe found. Pick the game folder or default.xbe from your extracted NTSC-U disc.";
+
+    BOOL rootScoped = [root startAccessingSecurityScopedResource];
+
     for (NSURL *u in [fm enumeratorAtURL:root includingPropertiesForKeys:keys options:0 errorHandler:nil]) {
         NSNumber *dir = nil, *size = nil;
         [u getResourceValue:&dir forKey:NSURLIsDirectoryKey error:nil];
@@ -242,16 +313,25 @@ static BOOL copy_file(NSString *from, NSString *to, char *buf,
     }
     space = [[NSURL fileURLWithPath:game.stringByDeletingLastPathComponent]
              resourceValuesForKeys:@[ NSURLVolumeAvailableCapacityForImportantUsageKey ] error:nil];
-    if ([space[NSURLVolumeAvailableCapacityForImportantUsageKey] unsignedLongLongValue] < total + (256ull << 20))
+    if ([space[NSURLVolumeAvailableCapacityForImportantUsageKey] unsignedLongLongValue] < total + (256ull << 20)) {
+        if (rootScoped)
+            [root stopAccessingSecurityScopedResource];
         return [NSString stringWithFormat:@"Not enough free space: the game needs %.1f GB.",
                 total / 1e9];
+    }
 
     [fm removeItemAtPath:tmp error:nil];
-    if (![fm createDirectoryAtPath:tmp withIntermediateDirectories:YES attributes:nil error:&e])
+    if (![fm createDirectoryAtPath:tmp withIntermediateDirectories:YES attributes:nil error:&e]) {
+        if (rootScoped)
+            [root stopAccessingSecurityScopedResource];
         return e.localizedDescription;
+    }
     buf = malloc(COPY_CHUNK);
-    if (!buf)
+    if (!buf) {
+        if (rootScoped)
+            [root stopAccessingSecurityScopedResource];
         return @"Out of memory.";
+    }
     fprintf(stderr, "[ios] importing %s (%llu MB)\n", root.fileSystemRepresentation,
             (unsigned long long)(total >> 20));
     for (NSURL *u in items) {
@@ -282,13 +362,22 @@ static BOOL copy_file(NSString *from, NSString *to, char *buf,
     free(buf);
 
     if (!err) {
-        NSString *xbe = [tmp stringByAppendingPathComponent:@"default.xbe"];
-        NSDictionary *a = [fm attributesOfItemAtPath:xbe error:nil];
-        dispatch_async(dispatch_get_main_queue(), ^{ self->_status.text = @"Checking default.xbe…"; });
-        sha = xbe_sha1(xbe);
-        if (a.fileSize != XBE_SIZE || ![sha isEqualToString:@XBE_SHA1])
-            err = [NSString stringWithFormat:@"This default.xbe is not the North American (NTSC-U) "
-                   @"release this port is built from (SHA-1 %@).", sha ?: @"unreadable"];
+        NSString *xbe = find_xbe_in_dir(fm, tmp);
+        if (!xbe) {
+            err = @"default.xbe was not found after copying.";
+        } else {
+            NSString *canonicalXbe = [tmp stringByAppendingPathComponent:@"default.xbe"];
+            if (![xbe isEqualToString:canonicalXbe]) {
+                [fm moveItemAtPath:xbe toPath:canonicalXbe error:nil];
+                xbe = canonicalXbe;
+            }
+            NSDictionary *a = [fm attributesOfItemAtPath:xbe error:nil];
+            dispatch_async(dispatch_get_main_queue(), ^{ self->_status.text = @"Checking default.xbe…"; });
+            sha = xbe_sha1(xbe);
+            if (a.fileSize != XBE_SIZE || ![sha isEqualToString:@XBE_SHA1])
+                err = [NSString stringWithFormat:@"This default.xbe is not the North American (NTSC-U) "
+                       @"release this port is built from (SHA-1 %@).", sha ?: @"unreadable"];
+        }
     }
     /* In place: replace what a partial earlier copy left, item by item. */
     if (!err) {
@@ -303,6 +392,8 @@ static BOOL copy_file(NSString *from, NSString *to, char *buf,
         }
     }
     [fm removeItemAtPath:tmp error:nil];
+    if (rootScoped)
+        [root stopAccessingSecurityScopedResource];
     return err;
 }
 @end
@@ -331,7 +422,7 @@ int ios_import_game(const char *game_dir)
     if (getenv("NFSU2_IMPORT_FROM"))
         [vc importFrom:[NSURL fileURLWithPath:@(getenv("NFSU2_IMPORT_FROM")) isDirectory:YES]];
     while (!vc.done)
-        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, true);
+        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
     win.hidden = YES;
     return 1;
 }
