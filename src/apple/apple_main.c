@@ -126,31 +126,8 @@ static void make_layer(void *arg)
     if (view)
         s_layer = SDL_Metal_GetLayer(view);
 #if TARGET_OS_IPHONE
-    if (s_layer) {
-        UIView *metalView = (__bridge UIView *)view;
-        UIWindow *win = metalView.window;
-        if (!win && s_win) {
-            SDL_SysWMinfo wm;
-            SDL_VERSION(&wm.version);
-            if (SDL_GetWindowWMInfo(s_win, &wm) && wm.subsystem == SDL_SYSWM_UIKIT)
-                win = wm.info.uikit.window;
-        }
-        if (win) {
-            metalView.frame = win.bounds;
-            metalView.autoresizingMask =
-                UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        }
-        CGFloat scale = [UIScreen mainScreen].nativeScale;
-        if (scale < 1.0) scale = [UIScreen mainScreen].scale;
-        if (scale < 1.0) scale = 2.0;
-        CAMetalLayer *layer = (__bridge CAMetalLayer *)s_layer;
-        layer.contentsScale = scale;
-        CGSize bsz = metalView.bounds.size;
-        if (bsz.width > 0 && bsz.height > 0)
-            layer.drawableSize = CGSizeMake(bsz.width * scale, bsz.height * scale);
-
+    if (s_layer)
         ios_touch_attach(s_win);        /* above the Metal view SDL just added */
-    }
 #endif
 }
 
