@@ -79,9 +79,14 @@ jobs:
           GEN_URL="${INPUT_GEN_URL:-$SECRET_GEN_URL}"
           XBE_URL="${INPUT_XBE_URL:-$SECRET_XBE_URL}"
 
-          if [ -n "$GEN_URL" ]; then
+          if [ -f "gen.tar.gz" ]; then
+            echo "==> Extracting pre-lifted game code from repo gen.tar.gz..."
+            tar -xzf gen.tar.gz
+            rm -f gen/recomp_stub.c
+          elif [ -n "$GEN_URL" ]; then
             echo "==> Downloading pre-lifted C code from $GEN_URL..."
             curl -fSL "$GEN_URL" | tar -xz -C .
+            rm -f gen/recomp_stub.c
           elif [ -n "$SECRET_GEN_BASE64" ]; then
             echo "==> Extracting gen/ from base64 secret..."
             echo "$SECRET_GEN_BASE64" | base64 -d | tar -xz -C .
